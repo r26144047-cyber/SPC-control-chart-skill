@@ -1,0 +1,400 @@
+---
+title: "{{TITLE}}"
+subtitle: "SPC 管制圖分析報告（統計背景版）"
+lang: zh-TW
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: false
+    code-tools: true
+    code-overflow: wrap
+    embed-resources: true
+    theme: cosmo
+    highlight-style: github
+    html-math-method: mathjax
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  fig-width: 9
+  fig-height: 4.2
+  fig-dpi: 150
+---
+
+```{r}
+#| label: define-all
+#| echo: false
+#| ref.label: !expr c("fn-setup", "fn-data", "fn-select", "fn-limits", "fn-rules", "fn-phase1", "fn-checks", "fn-smallshift", "fn-residual", "fn-run", "fn-plot", "fn-formulas", "fn-interpret", "fn-ocap", "fn-arl")
+```
+
+# 監測問題、目標與分析設定
+
+```{r}
+#| label: config
+# <<SPC:config>>
+```
+
+```{r}
+#| label: private-guide
+#| echo: false
+#| results: asis
+if (isTRUE(cfg$private)) cat(
+"::: {.callout-important}
+## 本機執行說明（非公開資料範本）
+1. 依上方設定區填好資料路徑與欄位名稱，於本檔所在資料夾執行 `quarto render`（檔名依實際名稱）。
+2. 第一次 render 後，資料夾內會出現 `", cfg$exclusions_file %||% "exclusions.csv", "`，列出基準期（Phase I）的警報點。
+3. 對照現場紀錄，在 `decision` 欄填 `exclude`（找到可歸屬原因、且不屬於未來正常機制）或 `keep`（查無原因或屬於正常機制），在 `reason` 欄寫原因；不要改動 `id` 欄。
+4. 再 render 一次；剔除後若出現新的警報，會附加在同一檔案中，重複到第 6 章顯示「基準已定案」為止。
+5. 所有計算都在本機完成，資料與結果不需要也不應傳回給任何外部服務。
+:::
+")
+```
+
+本報告監測的品質特性為 **`r cfg$characteristic`**`r if (nzchar(cfg$unit %||% "")) paste0("（單位：", cfg$unit, "）") else ""`。`r cfg$purpose %||% ""`
+
+<!-- 分析者補充：品質特性定義、監測單位、改善方向、重要偏移大小與可容忍誤報。 -->
+
+# 主要結果摘要
+
+```{r}
+#| label: run
+res <- spc_run(cfg)
+cfg <- res$cfg  # 補上預設值後的完整設定
+```
+
+- **選圖：**`r res$sel$label` 圖。`r res$sel$reason`
+- **基準期（Phase I）：**`r spc_text_phase1(res)`
+- **監測期（Phase II）：**`r spc_text_phase2(res)`
+- **小偏移偵測：**`r spc_text_small(res)`
+- **主要限制：**`r if (length(res$checks$messages)) paste(res$checks$messages, collapse = " ") else "假設檢查未發現明顯問題（未拒絕不等於已證明成立）。"`
+
+主流程函式如下；它依序呼叫後面各章說明的步驟。結果文字由規則產生，不宣稱警報原因已被證實。
+
+```{r}
+#| label: fn-run
+#| eval: false
+# <<SPC:run>>
+```
+
+```{r}
+#| label: fn-interpret
+#| eval: false
+# <<SPC:interpret>>
+```
+
+# 資料、Phase 0 規劃與合理分組
+
+## 資料檢查
+
+```{r}
+#| label: data-summary
+i <- res$prep$info
+stats::setNames(data.frame(c("原始資料列數", "因必要欄位缺失而排除的列數", "Phase I 點數", "Phase II 點數",
+         "Phase 切分方式", "時間排序"),
+  c(i$n_rows_raw, i$n_rows_na, i$m1, i$m2, i$phase_rule,
+         if (is.na(i$time_sorted)) "未提供時間欄位，沿用列順序" else if (i$time_sorted) "原本已依時間排序" else "已依時間重新排序")), c("項目", "內容")) |> print()
+if (!is.null(i$n_table)) print(i$n_table)  # 子群大小 n 的分布
+if (length(res$prep$warnings)) print(res$prep$warnings)
+```
+
+`r if (length(res$prep$warnings)) "上面列出的資料警告會影響解讀，請先確認。" else "資料檢查未發現結構問題。"` 子群圖保留子群編號與組內原始值；計數圖保留分子與分母（或暴露量），不只使用比例。
+
+```{r}
+#| label: fn-data
+#| eval: false
+# <<SPC:data>>
+```
+
+## 合理分組與量測系統
+
+```{r}
+#| label: advice
+#| results: asis
+cat(paste0("- ", spc_subgroup_advice(res), collapse = "\n"))
+```
+
+子組應在相近條件下收集，使組內變異代表短期波動、組間差異反映想偵測的變化。子組大小 $n$ 與 Phase I 子組數 $m$ 不同；$m=25$ 只是常見起點，基準長度要能涵蓋代表性的工作條件。
+
+# 選圖理由與公式
+
+**選用 `r res$sel$label` 圖：**`r res$sel$reason`
+
+```{r}
+#| label: fn-select
+#| eval: false
+# <<SPC:select>>
+```
+
+## 界限公式與本次估計值
+
+所有參數只由 Phase I 中未剔除的點估計；Phase II 不參與估計。
+
+```{r}
+#| label: formulas
+#| echo: false
+#| results: asis
+cat(spc_formula_md(res))
+```
+
+```{r}
+#| label: fn-setup
+#| eval: false
+# <<SPC:setup>>
+```
+
+```{r}
+#| label: fn-limits
+#| eval: false
+# <<SPC:limits>>
+```
+
+```{r}
+#| label: fn-formulas
+#| eval: false
+# <<SPC:formulas>>
+```
+
+# 假設與條件檢查
+
+先看穩定性，再看分布：把多個狀態混合的資料拿去做常態檢定，無法區分非常態與製程偏移。檢定結果是判斷線索，不以單一 $p$ 值機械決定。
+
+```{r}
+#| label: checks
+ck <- res$checks
+stats::setNames(data.frame(c("基準點數 m", "lag-1 自相關", "Ljung–Box p 值", "個別值 Shapiro–Wilk p 值",
+         "子群平均 Shapiro–Wilk p 值", "全距／移動全距為 0 的比例", "Pearson 離散指標"),
+  c(ck$m, ck$acf1 %||% NA, ck$lb_p %||% NA, ck$shapiro_p %||% NA,
+         ck$shapiro_mean_p %||% NA, ck$zero_spread %||% NA, ck$phi %||% NA)), c("檢查", "結果"))
+```
+
+```{r}
+#| label: checks-text
+#| echo: false
+#| results: asis
+if (length(ck$messages)) cat(paste0("- ", ck$messages, collapse = "\n"), "\n\n") else cat("未發現明顯問題（未拒絕虛無假設不代表已證明獨立或常態）。\n\n")
+if (length(ck$recommend)) cat("**建議的替代做法（由分析者依製程知識決定是否採用）：**\n\n", paste0("- ", ck$recommend, collapse = "\n"), "\n")
+```
+
+```{r}
+#| label: acf-plot
+#| fig-height: 3.2
+yb <- res$prep$points$y[res$base]
+if (length(yb) >= 10) {
+  a <- acf(yb, plot = FALSE, lag.max = min(15, length(yb) - 1))
+  ggplot(data.frame(lag = a$lag[-1], acf = a$acf[-1]), aes(lag, acf)) +
+    geom_hline(yintercept = 0) + geom_segment(aes(xend = lag, yend = 0), colour = "#235789") +
+    geom_hline(yintercept = c(-1, 1) * 1.96 / sqrt(length(yb)), linetype = "dashed", colour = "gray50") +
+    labs(title = "Phase I autocorrelation", x = "Lag", y = "ACF") + theme_minimal(base_size = 11)
+}
+```
+
+```{r}
+#| label: fn-checks
+#| eval: false
+# <<SPC:checks>>
+```
+
+# Phase I：建立基準
+
+## 判讀規則
+
+位置圖（$\bar X$、$I$、殘差圖）預先採用 $\mathrm{WECO}$ 四項規則（以同一側計算）：單點超過 $\pm3s_Y$；最近 3 點中至少 2 點超過同側 $2s_Y$；最近 5 點中至少 4 點超過同側 $1s_Y$；連續 8 點嚴格位於 $\mathrm{CL}$ 同一側。規則 2、3 在「完成條件且本身位於該區帶」的點上標記。$R$／$S$／$\mathrm{MR}$ 圖、計數圖與 $\mathrm{EWMA}$／$\mathrm{CUSUM}$ 只判斷是否超界。增加規則會提高誤報，不能沿用 $ARL_0\approx370$。
+
+```{r}
+#| label: fn-rules
+#| eval: false
+# <<SPC:rules>>
+```
+
+## Phase I 管制圖
+
+`r spc_text_phase1(res)`
+
+```{r}
+#| label: phase1-plots
+#| fig-height: 3.6
+for (nm in names(res$charts)) {
+  t <- res$charts[[nm]]; mt <- spc_chart_meta(nm, cfg)
+  print(spc_gg(t[t$phase == "I", ], paste(mt$t, "- Phase I"), mt$y))
+}
+```
+
+```{r}
+#| label: fn-plot
+#| eval: false
+# <<SPC:plot>>
+```
+
+## 失控點調查紀錄
+
+```{r}
+#| label: exclusions
+ex <- res$exclusions
+if (nrow(ex)) {
+  ex$status <- ifelse(ex$decision == "exclude", "已剔除", ifelse(ex$decision == "keep", "保留（未找到原因或屬正常機制）",
+               ifelse(ex$currently_flagged, "待調查", "目前界限下已無警報")))
+  ex[c("id", "round", "chart", "rules", "direction", "status", "reason")]
+} else "Phase I 沒有警報點。"
+```
+
+只有找到合理原因、且確認不屬於未來基準機制，才剔除並重算；原因無法辨識時不為了漂亮圖形反覆刪點。紀錄檔為 `r cfg$exclusions_file %||% "exclusions.csv"`，`round` 表示該點第一次出現警報的輪次。
+
+```{r}
+#| label: fn-phase1
+#| eval: false
+# <<SPC:phase1>>
+```
+
+## 定案的管制界限
+
+```{r}
+#| label: limits-table
+do.call(rbind, lapply(names(res$charts), function(nm) {
+  t <- res$charts[[nm]]
+  f <- function(v) if (length(unique(signif(v, 8))) == 1) format(signif(v[1], 5)) else
+    sprintf("逐點（%s – %s）", format(signif(min(v), 5)), format(signif(max(v), 5)))
+  data.frame(chart = nm, CL = f(t$CL), LCL = f(t$LCL), UCL = f(t$UCL))
+}))
+```
+
+# Phase II：監測
+
+`r spc_text_phase2(res)`
+
+```{r}
+#| label: phase2-plots
+#| fig-height: 3.8
+if (any(res$prep$points$phase == "II")) for (nm in names(res$charts)) {
+  mt <- spc_chart_meta(nm, cfg); print(spc_gg(res$charts[[nm]], paste(mt$t, "- Phase I | Phase II"), mt$y))
+}
+```
+
+```{r}
+#| label: phase2-table
+if (!is.null(res$phase2_signals)) res$phase2_signals else "Phase II 沒有警報（或沒有 Phase II 資料）。"
+```
+
+Phase II 固定使用 Phase I 定案的界限，不以監測期資料重新估計；`rules` 欄列出觸發的規則編號。
+
+<!-- 分析者補充：警報與現場事件的對照（僅限分支 1，且資料可公開時）。 -->
+
+# 小偏移偵測：EWMA 與 CUSUM
+
+`r spc_text_small(res)`
+
+輸入為子群平均時，$s_Y=\hat\sigma/\sqrt n$；工程上關心個體均值改變 $\Delta$ 時，標準化偏移為 $\delta_Y=\Delta/(\sigma/\sqrt n)$。
+
+$$Z_t=\lambda Y_t+(1-\lambda)Z_{t-1},\quad Z_0=\mu_0,\qquad V_t=\lambda^2s_{Y,t}^2+(1-\lambda)^2V_{t-1},\ V_0=0,\qquad \mathrm{LCL}_t/\mathrm{UCL}_t=\mu_0\mp L\sqrt{V_t}.$$
+
+$$W_t=\frac{Y_t-\mu_0}{s_Y},\qquad C_t^+=\max\{0,C_{t-1}^++W_t-k\},\qquad C_t^-=\max\{0,C_{t-1}^--W_t-k\},\qquad \text{警報：}C_t^\pm>h.$$
+
+本次 $\lambda=`r cfg$ewma_lambda`$、$L=`r cfg$ewma_L`$、$k=`r cfg$cusum_k`$、$h=`r cfg$cusum_h`$。常態模型下常取 $k=\delta_Y/2$；$h$ 與 $L$ 應依期望 $ARL_0$ 校準，預設值不保證 $ARL_0=370$。
+
+```{r}
+#| label: small-plots
+#| fig-height: 3.6
+if (isTRUE(res$small$use)) {
+  print(spc_gg(res$small$ewma, "EWMA (time-dependent limits)", "EWMA", phase_line = FALSE))
+  print(spc_gg(res$small$cusum_up, "Upper CUSUM", "C+", phase_line = FALSE))
+  print(spc_gg(res$small$cusum_lo, "Lower CUSUM (nonnegative)", "C-", phase_line = FALSE))
+}
+```
+
+警報後的連續超界值因記憶而高度相關；實務應在首次警報時進入處置，再決定是否重設。
+
+```{r}
+#| label: fn-smallshift
+#| eval: false
+# <<SPC:smallshift>>
+```
+
+# 自相關資料的殘差管制圖
+
+`r if (isTRUE(res$resid$use)) sprintf("本次採 AR(1) 殘差圖：以 Phase I 前 %d 點訓練，後 %d 點校準；$\\hat\\phi=%.3f$、$\\hat\\mu=%.4g$，校準殘差 Ljung–Box $p=%.3g$。", res$resid$n_train, res$resid$n_cal, res$resid$phi, res$resid$mu, res$resid$lb_p) else "本次未使用殘差管制圖（僅在個別值有自相關、且依製程知識判斷為正常慣性時，設定 residual_chart = TRUE 使用）。"`
+
+$$X_t=\mu+\phi(X_{t-1}-\mu)+\varepsilon_t,\qquad \widehat X_{t|t-1}=\hat\mu+\hat\phi(X_{t-1}-\hat\mu),\qquad r_t=X_t-\widehat X_{t|t-1},\qquad \bar r_{cal}\pm3\hat\sigma_r.$$
+
+```{r}
+#| label: resid-plots
+#| fig-height: 3.6
+if (isTRUE(res$resid$use)) {
+  print(spc_gg(res$resid$tab, "Fixed AR(1): one-step residuals (calibration | monitoring)", "Residual"))
+}
+```
+
+殘差圖只監測偏離模型的變化；持續偏移 $\Delta$ 後平均殘差約增加 $(1-\phi)\Delta$，高自相關時較難偵測，仍應同時檢視原始值。
+
+```{r}
+#| label: fn-residual
+#| eval: false
+# <<SPC:residual>>
+```
+
+# 偵測設計與限制
+
+- 名目 $ARL_0=1/\alpha\approx370.4$ 只在「獨立常態、參數已知、只用超界規則」時成立；本報告估計參數、使用多條 $\mathrm{WECO}$ 規則或多張圖聯合監測，實際誤報率會較高（見附錄 A）。
+- 不同基準資料會產生不同的界限；Phase I 只有 $m=`r res$checks$m`$ 點時，條件式 $ARL_0$ 的分布可能很寬（附錄 A.2）。
+- 警報是調查線索，不是原因已被證實；沒有警報表示「尚未出現指定規則的警報」，不代表製程已被證明穩定。
+- 本報告不評估製程能力（$C_p$、$C_{pk}$），管制界限也不能以規格界限代替。
+
+# 結論與建議
+
+`r spc_text_phase1(res)` `r spc_text_phase2(res)`
+
+<!-- 分析者補充：連結研究問題與實際意義，區分資料支持的結論、推測與建議。 -->
+
+## 失控處理計畫（OCAP）
+
+```{r}
+#| label: ocap
+knitr::kable(spc_ocap(res))
+```
+
+```{r}
+#| label: fn-ocap
+#| eval: false
+# <<SPC:ocap>>
+```
+
+# 附錄 A：偵測表現模擬 {.appendix}
+
+## A.1 零狀態 ARL（已知參數、標準化輸入）
+
+```{r}
+#| label: arl-sim
+set.seed(cfg$seed)
+dY <- if (is.finite(res$small$delta_Y %||% NA)) res$small$delta_Y else 1
+B <- cfg$arl_reps
+rbind(spc_mc_arl("Shewhart", 0, B, cfg), spc_mc_arl("EWMA", 0, B, cfg), spc_mc_arl("CUSUM", 0, B, cfg),
+      spc_mc_arl("Shewhart", dY, B, cfg), spc_mc_arl("EWMA", dY, B, cfg), spc_mc_arl("CUSUM", dY, B, cfg))
+```
+
+`restricted_mean_RL` 是截止於 10000 步的限制平均，`censor_fraction` 大於 0 時不能當作完整 ARL；`MCSE` 為 Monte Carlo 標準誤。本表只用超界規則，未匹配各圖的 $ARL_0$，不能直接排名偵測速度。
+
+## A.2 參數估計對條件式 ARL 的影響
+
+```{r}
+#| label: cond-arl
+set.seed(cfg$seed)
+spc_conditional_arl(max(res$checks$m, 2), B = 1000)
+```
+
+以 $I$ 型位置圖簡化：在基準長度 $m$ 下，不同基準資料估得的界限使條件式 $ARL_0$ 分布於 `q10`–`q90` 之間。
+
+```{r}
+#| label: fn-arl
+#| eval: false
+# <<SPC:arl>>
+```
+
+# 附錄 B：參考資料與執行環境 {.appendix}
+
+方法、公式與判讀規則依據《SPC 管制圖技能教科書》，其主要來源為：Zwetsloot, Jones-Farmer & Woodall (2024), *Quality Engineering, 36*(3), 487–499；Jones-Farmer et al. (2014), *Journal of Quality Technology, 46*(3), 265–280；Jensen et al. (2006), *JQT, 38*(4), 349–364；Lucas & Saccucci (1990), *Technometrics, 32*(1), 1–12；Page (1954), *Biometrika, 41*, 100–115；Alwan & Roberts (1988), *JBES, 6*(1), 87–95；NIST/SEMATECH *e-Handbook of Statistical Methods* §6.3。
+
+```{r}
+#| label: session-info
+sessionInfo()
+```

@@ -1,0 +1,954 @@
+---
+title: "SPC 管制圖技能教科書"
+subtitle: "從選圖、假設檢查與公式，到判讀及可重現的 R 實作"
+lang: zh-TW
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: false
+    code-tools: true
+    embed-resources: true
+    theme: cosmo
+    highlight-style: github
+    html-math-method: mathjax
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  fig-width: 9
+  fig-height: 4.6
+  fig-dpi: 150
+---
+
+# AI 協作整理聲明
+
+本教材由使用者提供資料，並透過人工智慧（AI）協作進行內容整理、文字編修、專有名詞統一，以及數字、公式與統計符號的 LaTeX 格式調整。AI 為輔助整理工具，不列為作者，亦不作為學術論述或公式正確性的證據。
+
+AI 協作產生或修訂的內容仍可能包含錯誤、遺漏或不精確之處；使用者及後續編修者應依原始文獻與官方文件核對論述、公式、引用及程式結果。本聲明不代表教材已完成逐項文獻查證、程式執行驗證或專家審查。實際用於教學、研究或製程決策前，應完成相應查核，並由使用者及採用者負責最終內容與應用判斷。
+
+本教材所列參考文獻為內容依據，AI 協作不改變原始文獻的著作權與引用要求。
+
+# 如何使用本書
+
+本書把 $\mathrm{SPC}$（statistical process control，統計製程管制）整理成可練習、可檢核的技能。讀者應能從資料型態及偵測目的選圖，說明管制界限的由來，檢查模型條件，執行 R 程式，並把警報轉為調查與改善行動。
+
+**適用範圍：**單變量製程監測；涵蓋 $\bar{X}\text{–}R$、$\bar{X}\text{–}S$、$I\text{–}\mathrm{MR}$、$p$、$np$、$c$、$u$、$\mathrm{EWMA}$、$\mathrm{CUSUM}$，以及自相關資料的殘差管制圖。成對管制圖中的每張圖均有公式與對應程式。另介紹變動樣本數、離散分布精確界限、警報規則及參數估計的影響。多變量 $T^2$、$\mathrm{MEWMA}$、輪廓監測、$g$/$t$ 稀有事件圖及風險調整圖不在本書實作範圍；遇到這些資料時應另作設計，不能直接套用本書公式。
+
+**資料與來源：**使用者壓縮檔內六篇論文是觀念主軸 [1–6]；傳統圖的公式另以 NIST 官方手冊交叉核對 [7–13]。本書為重新組織的教學內容，並非逐頁翻譯或原文圖表重製。所有 R 資料皆為本書自行模擬，並非論文原始數據；程式示範亦非原作者提供之程式。文獻中的建議是研究觀點，實際採用仍須考慮製程知識。
+
+::: {.callout-note}
+## 學習順序
+
+先讀第 $2\text{–}4$ 章建立基礎，再依選圖表閱讀各章。執行程式時，請先執行「共用 R 工具」，之後可執行各主圖章節；精確界限與離散診斷章節會沿用 $p$／$u$ 圖的資料，須先執行這兩節。範例以 `base`／`0` 命名代表 Phase I，以 `new`／`1` 或監測序列代表 Phase II；不得用監測期資料重新估計界限來掩蓋偏移。
+:::
+
+# 建立 $\mathrm{SPC}$ 的正確問題
+
+## 管制圖、規格與能力是三件事
+
+管制圖問：「相對於已定義的基準機制，現在是否出現值得調查的變化？」中心線（$\mathrm{CL}$）表示基準位置；管制上限（$\mathrm{UCL}$）及管制下限（$\mathrm{LCL}$）依統計模型或經驗基準設定。
+
+規格上限 $\mathrm{USL}$／下限 $\mathrm{LSL}$ 則來自顧客、工程或法規要求。**管制界限不能由規格界限代替。**製程可以穩定卻持續不符規格；也可以出現變化但產品暫時仍合格。能力指標評估製程相對規格的表現，但通常先要釐清穩定性與適當分布，不能用能力指標代替均值與變異的分開監測 [1,2]。
+
+共同原因是基準系統內持續存在的變異來源；特殊原因是可辨識、偏離基準機制的變化。警報是調查線索，不是原因已被證實；沒有警報也不等於已證明製程完全穩定。
+
+## 四階段工作流
+
+Zwetsloot 等人提出 Phase 0、I、II、III 架構 [1]。本書依此安排工作：
+
+| 階段 | 要完成的工作 | 可檢核成果 |
+|---|---|---|
+| Phase 0：規劃 | 定義品質特性、量測系統、資料欄位、抽樣及合理分組 | 資料字典與抽樣計畫 |
+| Phase I：回顧分析 | 保留時間順序，調查變異、穩定性、分布、依賴及可解釋異常 | 有調查紀錄的基準資料、模型、參數 |
+| Phase II：前瞻監測 | 固定基準及警報規則，以新資料依序更新監測統計量 | 警報紀錄與處置流程 |
+| Phase III：維護 | 定期評估模型及基準是否仍適用；有證據時重新建立基準 | 版本、原因、資料期間及核定紀錄 |
+
+Phase I 不只是刪掉紅點。應先追查資料錯誤、機台／原料／班別差異與製程變化；只有找到合理原因且確認其不屬於未來基準機制，才排除相應資料並留下紀錄。若異常原因無法辨識，不可為了漂亮圖形反覆刪除 [1,2]。
+
+## 合理分組與抽樣設計
+
+子組應在相近、可比較條件下收集，使組內變異代表短期波動，組間差異能反映想偵測的變化。例如每小時連續抽取 $5$ 件，通常比把同一天五個不同班別的各一件混成子組更容易解釋。但機台或產品本就不同時，應分層或建模，不能把所有資料混成同一張圖。
+
+子組大小 $n$ 與 Phase I 子組數 $m$ 不同。$25$ 組、每組 $5$ 件只是常見教學起點，不是能保證界限準確的標準。基準長度要能涵蓋代表性工作條件，並依參數不確定性、警報成本及偵測需求決定 [2,3]。
+
+抽樣間隔還會影響實際偵測時間。若每 $10$ 分鐘抽一次，延遲 $6$ 個觀測點相當於約 $60$ 分鐘；不等間隔抽樣時，不可把點數直接當成固定時間。
+
+# 選擇管制圖並檢查假設
+
+## 選圖速查
+
+| 問題與資料 | 首選圖 | 補充與限制 |
+|---|---|---|
+| 連續量，每次有合理子組，傳統小子組情境 | $\bar{X}\text{–}R$ | 常見 $n=2\text{–}10$；$S$ 圖也可用於小子組 |
+| 連續量，每次有合理子組，重視變異估計效率 | $\bar{X}\text{–}S$ | 大子組通常優於 $R$；不必等到 $n>10$ 才能用 |
+| 連續量，每次只能取得一筆 | $I\text{–}\mathrm{MR}$ | 必須檢查偏態與序列相關；$\mathrm{MR}$ 不是萬用變異監測方法 |
+| 每件只有合格／不合格，分母可變 | $p$ | 同一件最多計為一個不合格品 |
+| 每件只有合格／不合格，分母固定 | $np$ | 監測不合格品數，方便解讀件數 |
+| 缺點總數、每期檢查機會固定 | $c$ | 一件產品可有多個缺點 |
+| 缺點總數、每期暴露量不同 | $u$ | 須保留件數、面積、時間等暴露量 |
+| 想偵測較小且持續的均值變化 | $\mathrm{EWMA}$ 或 $\mathrm{CUSUM}$ | 以適當標準誤為尺度，先選目標偏移及誤報設計 |
+| 原始連續量有可解釋自相關 | 模型＋殘差圖 | 先分開訓練及校準，再監測一步預測誤差 |
+
+同一製程可能同時需要均值圖與變異圖。$\mathrm{EWMA}$／$\mathrm{CUSUM}$ 也可與 Shewhart 圖合用，但聯合使用會改變整體誤報率，不能宣稱仍有原單張圖的 $\mathrm{ARL}$ [1,4]。
+
+## 假設與條件檢查表
+
+| 條件 | 為何重要 | 不滿足時的處理方向 |
+|---|---|---|
+| 量測可靠且定義一致 | 儀器漂移或分類標準變動會造成假訊號 | 先校正、評估量測系統、統一分類定義 |
+| 基準具代表性且相對穩定 | 不穩定基準可能放大界限而遮蔽變化 | 先調查、分層、改善，再建立基準 |
+| 時間順序完整 | 排序、缺漏或重複可能改變 $\mathrm{MR}$ 與連續規則 | 保留時間戳；不要依大小排序作圖 |
+| 獨立或已適當處理依賴 | 自相關使傳統界限及 $\mathrm{ARL}$ 不再適用 | 看時間圖、$\mathrm{ACF}$；採合理模型或另行校準 |
+| 統計量分布合理 | 尾端誤報與下側偵測受分布影響 | 看穩定期分布；用分位數、模型或模擬界限 |
+| 樣本數／暴露量正確 | 分母改變會改變標準誤 | 使用逐點界限；零暴露期不能當成零缺點率 |
+| Binomial／Poisson 模型合適 | 混合來源或群聚造成額外變異 | 檢查過度／不足離散、分層或建模 |
+
+常態不是「任何管制圖都能畫」的必要條件，但常態與獨立性是許多傳統三標準差界限及理論誤報率的前提。$\bar X$ 的近似常態程度取決於原分布、子組大小及相關性，不能只說「有平均就一定常態」。$R$、$S$ 的常數也以常態母體推導。
+
+先看穩定性，再討論分布。把多個狀態混合的資料拿去做常態檢定，無法區分非常態與製程偏移；也不宜先任意轉換資料只為通過常態檢定，因為可能掩蓋重要異常 [1,2]。
+
+# 讀懂公式、界限與警報
+
+## 共用符號
+
+| 符號 | 意義 |
+|---|---|
+| $m$ | Phase I 子組數或基準觀測數，依章節註明 |
+| $n_i$、$n$ | 第 $i$ 子組樣本數；固定樣本數 |
+| $X_{ij}$ | 第 $i$ 組第 $j$ 個連續觀測值 |
+| $\bar X_i$、$S_i$、$R_i$ | 子組平均、以 $n-1$ 為分母的樣本標準差、全距 |
+| $\mu_0$、$\sigma_0$ | 基準個體平均與標準差；實務中常以估計值代替 |
+| $s_Y$ | 被監測統計量 $Y$ 的基準標準差／標準誤 |
+| $D_i$ | 不合格品數，$0\le D_i\le n_i$ |
+| $C_i$、$e_i$ | 缺點數與正的暴露量 |
+| $\alpha$、$\mathrm{ARL}$ | 單點誤報率、發出警報前的平均觀測點數 |
+
+## 三標準差與 $\mathrm{ARL}$
+
+若每點為獨立標準常態、參數已知，且只用超過 $\pm3$ 的規則，則
+
+$$\alpha=2\{1-\Phi(3)\}\approx0.00270,\qquad ARL_0=1/\alpha\approx370.4.$$
+
+這是長期平均，不是保證每 $370$ 點才會有警報。連續監測 $T$ 個獨立點，至少一次誤報的機率為 $1-(1-\alpha)^T$；$T=100$ 時約 $23.7\%$。$ARL_1$ 表示變化後的平均延遲，越小通常表示越快偵測；也應考量延遲分位數、抽樣時間與損失。
+
+估計參數、重疊 $\mathrm{MR}$、$\mathrm{EWMA}$、$\mathrm{CUSUM}$、連續判讀規則或多張圖聯合監測時，警報事件未必獨立，不能直接把單點機率倒數當作 $\mathrm{ARL}$。不同基準資料也會產生不同的條件式 $\mathrm{ARL}$；同一套名目設定，不代表每位使用者都有相同表現 [3]。
+
+## 判讀規則：先約定，再使用
+
+本書的各圖程式預設只標記「超出界限」。以下是可預先選用的 **$\mathrm{WECO}$ 四項規則**，不是本書程式全部自動套用的規則 [12]：
+
+| 規則 | 定義（以同一側計算） | 常見調查方向 |
+|---|---|---|
+| 單點超界 | 任一點超過 $\pm3s_Y$ | 突發、資料錯誤、設備或原料改變 |
+| $2/3$ | 最近 $3$ 點中至少 $2$ 點超過同側 $2s_Y$ | 持續偏移 |
+| $4/5$ | 最近 $5$ 點中至少 $4$ 點超過同側 $1s_Y$ | 較小偏移 |
+| 同側連續 $8$ 點 | $8$ 點都嚴格高於 $\mathrm{CL}$ 或都低於 $\mathrm{CL}$ | 位置改變；中心線點打斷序列 |
+
+連續 $6$ 點遞增／遞減是常見的額外趨勢規則；與採 $9$ 點同側等 Nelson 規則的版本不同，不能混用名稱與門檻。資料有 ties 時也須預先定義處理方式。增加規則會增加誤報，不能沿用 $ARL_0\approx370$。
+
+上述常態對稱區帶規則適合預先校準的 Shewhart 位置圖。不能把它們直接套在偏態 $R$／$S$ 圖、離散計數圖或有記憶的 $\mathrm{EWMA}$／$\mathrm{CUSUM}$ 上。$p$／$u$ 圖若 $n_i$ 或 $e_i$ 改變，應用各點正確的標準誤；也不能把固定高度的區帶畫上去就視為正確。
+
+## 警報後的處置
+
+確認量測與輸入資料，依品質風險決定隔離、加驗或調整；保留警報時間，回查最近變更及相關機台、材料、班別。將「找到特殊原因」「合理的共同原因模型仍不充分」「未找到原因」分開記錄。確認改善後，再決定是否重建基準；不要每有紅點就擴大界限，也不要每次正常波動都調機，造成過度調整。
+
+# 共用 R 工具與重現方式
+
+本書主範例只使用 R 隨附的 `stats`、`graphics`、`utils` 及 Quarto 執行所需的 `knitr`。圖內採英文短標籤以減少跨平台中文字型問題，解說及表格維持繁體中文。
+
+所有界限均只從基準資料估計。範例中的基準來自固定參數的模擬機制；這個設計不代表實務上能省略 Phase I 調查，也不保證模擬基準不會出現偶然超界點。
+
+```{r}
+#| label: setup
+set.seed(20261116)
+options(width = 95, digits = 4)
+par(mar = c(4.5, 4.5, 3.5, 1), mgp = c(2.2, .7, 0))
+
+# n >= 2；常態母體下 E(S) = c4(n) * sigma。
+c4 <- function(n) {
+  stopifnot(all(n >= 2))
+  sqrt(2 / (n - 1)) * exp(lgamma(n / 2) - lgamma((n - 1) / 2))
+}
+
+# 回傳逐點統計量與超界旗標；CL 可為標量或向量。
+spc_plot <- function(y, cl, lcl, ucl, title, ylab = "Statistic", phase = NULL) {
+  N <- length(y)
+  stopifnot(N > 0, length(cl) %in% c(1, N),
+            length(lcl) %in% c(1, N), length(ucl) %in% c(1, N))
+  cl <- rep_len(cl, N); lcl <- rep_len(lcl, N); ucl <- rep_len(ucl, N)
+  stopifnot(all(is.finite(c(y, cl, lcl, ucl))), all(lcl <= ucl))
+  signal <- y < lcl | y > ucl
+  t <- seq_len(N)
+  plot(t, y, type = "o", pch = 16, cex = .65,
+       col = "#235789", ylim = range(c(y, cl, lcl, ucl)),
+       main = title, xlab = "Observation / subgroup", ylab = ylab,
+       mgp = c(2.2, .7, 0), cex.lab = .9, cex.axis = .85, cex.main = 1)
+  lines(t, cl, col = "#238b45", lwd = 1.5)
+  lines(t, lcl, col = "#cb181d", lty = 2)
+  lines(t, ucl, col = "#cb181d", lty = 2)
+  if (!is.null(phase)) abline(v = phase + .5, lty = 3, col = "gray40")
+  points(t[signal], y[signal], pch = 19, col = "#cb181d", cex = 1)
+  invisible(data.frame(index = t, value = y, CL = cl, LCL = lcl,
+                       UCL = ucl, signal = signal))
+}
+
+report <- function(tab, baseline = 0L) {
+  ii <- which(tab$signal & tab$index > baseline)
+  data.frame(first_monitoring_signal = if (length(ii)) ii[1] - baseline else NA_integer_,
+             monitoring_signal_count = length(ii))
+}
+```
+
+$\mathrm{CL}$ 是綠線，$\mathrm{UCL}$／$\mathrm{LCL}$ 是紅色虛線，紅點表示超界；若含 Phase I，灰色直虛線分隔兩階段。`first_monitoring_signal` 是監測期內的第幾點，`NA` 表示該段沒有超界，並非證明沒有變化。`monitoring_signal_count` 是超界點數，不能當成獨立特殊原因的個數。
+
+# $\bar{X}\text{–}R$ 圖
+
+## 何時使用、條件與判讀
+
+每次在相近條件下抽取少量連續量，例如每小時量測 $5$ 件的直徑。$R$ 圖監測組內變異，$\bar X$ 圖監測組間位置。固定 $n$、合理分組、組內及組間近似獨立、基準分布近似常態是傳統常數的主要前提 [7]。
+
+傳統上常以 $n\le10$ 使用 $R$ 圖；這是方便性的經驗，不是數學界線。$S$ 圖利用全部資料，通常有較佳估計效率；$2024$ 實務文章更偏好 $S$／$S^2$ 來監測變異 [1]。
+
+先看 $R$ 圖，確認估計均值圖界限所用的組內變異合理。$R$ 圖上側警報表示組內離散增大；下側警報也可能代表改善、量測解析度不足或資料受限。$\bar X$ 警報指向均值／組間差異，不必然就是某一機台故障。
+
+## 公式
+
+固定子組大小 $n$ 時，
+
+$$\bar X_i=\frac1n\sum_{j=1}^n X_{ij},\quad R_i=\max_jX_{ij}-\min_jX_{ij},$$
+$$\bar{\bar X}=\frac1m\sum_{i=1}^m\bar X_i,\qquad \bar R=\frac1m\sum_{i=1}^mR_i,\qquad\hat\sigma=\bar R/d_2(n).$$
+
+| 圖 | $\mathrm{CL}$ | $\mathrm{LCL}$ | $\mathrm{UCL}$ |
+|---|---|---|---|
+| $\bar X$ | $\bar{\bar X}$ | $\bar{\bar X}-A_2\bar R$ | $\bar{\bar X}+A_2\bar R$ |
+| $R$ | $\bar R$ | $D_3\bar R$ | $D_4\bar R$ |
+
+$$A_2=\frac3{d_2\sqrt n},\quad D_3=\max\left(0,1-3\frac{d_3}{d_2}\right),\quad D_4=1+3\frac{d_3}{d_2}.$$
+
+其中 $d_2=E(R)/\sigma$、$d_3=\mathrm{SD}(R)/\sigma$。當 $n=5$，常用四捨五入常數為 $d_2=2.326$、$A_2=0.577$、$D_3=0$、$D_4=2.114$。這些常數不可挪用到不同 $n$。
+
+## R 範例：固定五件一組
+
+Phase I $60$ 組、Phase II $40$ 組；監測期前 $15$ 組維持原均值，之後均值增加 $1.2$ 個個體標準差。矩陣每列是一組，不把每列當成不同變數。
+
+```{r}
+#| label: xbar-r
+#| fig-height: 6.5
+set.seed(101)
+n <- 5; m <- 60; M <- 40
+base_R <- matrix(rnorm(m * n, 50, 1), nrow = m, byrow = TRUE)
+new_R <- matrix(rnorm(M * n, 0, 1), nrow = M, byrow = TRUE)
+new_R <- sweep(new_R, 1, c(rep(50, 15), rep(51.2, 25)), "+")
+all_R <- rbind(base_R, new_R)
+xb <- rowMeans(all_R)
+rr <- apply(all_R, 1, function(v) diff(range(v)))
+mu_R <- mean(rowMeans(base_R)); rb <- mean(rr[seq_len(m)])
+oldpar <- par(mfrow = c(2, 1), mar = c(4.5, 4.5, 3.5, 1))
+tab_R <- spc_plot(rr, rb, 0, 2.114 * rb, "R chart (n = 5)", "Range", m)
+tab_xR <- spc_plot(xb, mu_R, mu_R - .577 * rb, mu_R + .577 * rb,
+                   "Xbar chart using R", "Mean", m)
+par(oldpar)
+rbind(R = report(tab_R, m), Xbar = report(tab_xR, m))
+```
+
+**如何讀輸出：**均值偏移從 Phase II 第 $16$ 組開始；核對第一個均值警報相對於第 $16$ 組的位置。$R$ 圖可能仍無警報，因為本例只改均值，沒有改組內標準差。若偏移前已有警報，那是此段模擬中相對於真實未變機制的誤報，不應把它解釋成預知後續變化。
+
+**技能檢核：**把子組大小改為 $4$ 時，必須同步更換常數；不能只更改矩陣欄數。
+
+# $\bar{X}\text{–}S$ 圖
+
+## 何時使用、條件與判讀
+
+每期有合理子組，尤其子組較大或希望以全部資料估計組內變異時使用。與 $R$ 圖相同，要先看 $S$ 圖，再解讀均值圖；傳統 $S$ 圖界限也假定常態母體。$S$ 圖小樣本分布偏斜，三標準差界限並非精確等尾機率界限 [7]。
+
+## 公式
+
+$$S_i=\sqrt{\frac{\sum_{j=1}^n(X_{ij}-\bar X_i)^2}{n-1}},\quad \bar S=\frac1m\sum_i S_i,$$
+$$c_4(n)=\sqrt{\frac2{n-1}}\frac{\Gamma(n/2)}{\Gamma((n-1)/2)},\qquad \hat\sigma=\bar S/c_4.$$
+
+| 圖 | $\mathrm{CL}$ | $\mathrm{LCL}$ | $\mathrm{UCL}$ |
+|---|---|---|---|
+| $\bar X$ | $\bar{\bar X}$ | $\bar{\bar X}-A_3\bar S$ | $\bar{\bar X}+A_3\bar S$ |
+| $S$ | $\bar S$ | $B_3\bar S$ | $B_4\bar S$ |
+
+$$A_3=\frac3{c_4\sqrt n},\quad B_3=\max\left(0,1-3\frac{\sqrt{1-c_4^2}}{c_4}\right),\quad B_4=1+3\frac{\sqrt{1-c_4^2}}{c_4}.$$
+
+若 $\sigma_0$ 已知且資料獨立常態，則 $(n-1)S_i^2/\sigma_0^2\sim\chi^2_{n-1}$；可用卡方分位數設計 $S$ 或 $S^2$ 的機率界限。直接代入估計 $\sigma$ 後，不能宣稱仍保有已知參數的精確誤報率。
+
+## R 範例：只增加變異
+
+```{r}
+#| label: xbar-s
+#| fig-height: 6.5
+set.seed(102)
+nS <- 12; mS <- 60; MS <- 40
+base_S <- matrix(rnorm(mS * nS, 100, 2), nrow = mS, byrow = TRUE)
+new_S <- matrix(rnorm(MS * nS), nrow = MS, byrow = TRUE)
+new_S <- 100 + sweep(new_S, 1, c(rep(2, 15), rep(4, 25)), "*")
+all_S <- rbind(base_S, new_S)
+ss <- apply(all_S, 1, sd); xs <- rowMeans(all_S)
+sb <- mean(apply(base_S, 1, sd)); mu_S <- mean(base_S)
+c4S <- c4(nS); A3 <- 3 / (c4S * sqrt(nS))
+B3 <- max(0, 1 - 3 * sqrt(1 - c4S^2) / c4S)
+B4 <- 1 + 3 * sqrt(1 - c4S^2) / c4S
+oldpar <- par(mfrow = c(2, 1), mar = c(4.5, 4.5, 3.5, 1))
+tab_S <- spc_plot(ss, sb, B3 * sb, B4 * sb, "S chart", "SD", mS)
+tab_xS <- spc_plot(xs, mu_S, mu_S - A3 * sb, mu_S + A3 * sb,
+                   "Xbar chart using S", "Mean", mS)
+par(oldpar)
+rbind(S = report(tab_S, mS), Xbar = report(tab_xS, mS))
+```
+
+**如何讀輸出：**第 $16$ 個監測子組起標準差加倍，$S$ 圖應成為主要調查依據。即使真實均值仍為 $100$，均值圖也可能變得更容易超界，因為原本均值標準誤不再適用；不能看到均值圖紅點就斷言真實均值已改變。
+
+## 延伸：子組大小改變
+
+本書 $\bar{X}\text{–}R$／$\bar{X}\text{–}S$ 主例使用固定 $n$。若各組 $n_i$ 不同，在共同 $\mu,\sigma$ 模型下，均值圖應使用 $\hat\mu\pm3\hat\sigma/\sqrt{n_i}$；$S$ 圖的 $\mathrm{CL}$ 及界限也依 $c_4(n_i)$ 改變。
+
+下例以組內平方和合併估計變異，再作小樣本偏差修正；不把所有觀測直接做 `sd()`，因為組間變化可能污染估計。
+
+```{r}
+#| label: variable-subgroup
+set.seed(103)
+ni0 <- rep(c(4, 6, 8, 10), 20)
+groups0 <- lapply(ni0, function(k) rnorm(k, 30, 1.5))
+s0 <- vapply(groups0, sd, numeric(1))
+df0 <- sum(ni0 - 1)
+sp <- sqrt(sum((ni0 - 1) * s0^2) / df0)
+sigma_v <- sp / c4(df0 + 1)
+mu_v <- mean(unlist(groups0))
+ni1 <- rep(c(4, 6, 8, 10), 8)
+groups1 <- lapply(ni1, function(k) rnorm(k, 30.7, 1.5))
+x1 <- vapply(groups1, mean, numeric(1))
+s1 <- vapply(groups1, sd, numeric(1))
+vx <- spc_plot(x1, mu_v, mu_v - 3 * sigma_v / sqrt(ni1),
+               mu_v + 3 * sigma_v / sqrt(ni1), "Xbar: varying n", "Mean")
+vs <- spc_plot(s1, c4(ni1) * sigma_v,
+               pmax(0, c4(ni1) - 3 * sqrt(1 - c4(ni1)^2)) * sigma_v,
+               (c4(ni1) + 3 * sqrt(1 - c4(ni1)^2)) * sigma_v,
+               "S: varying n", "SD")
+```
+
+這是固定共同組內變異模型下的教學設計；樣本數若與品質結果有關，例如因異常才加抽，須重新評估抽樣設計及偵測表現。
+
+# $I\text{–}\mathrm{MR}$ 個別值與移動全距圖
+
+## 何時使用、條件與判讀
+
+每批只能取得一個數值，或抽樣成本高、無法形成有意義的子組時使用。$I$ 圖監測個別值位置；相鄰兩點的 $\mathrm{MR}$ 可作為短期變異估計。不能把高頻且高度相關的感測器資料直接當作獨立個別值 [6,8]。
+
+$\mathrm{MR}$ 是相鄰差值的絕對值，因此均值突跳也會造成大 $\mathrm{MR}$；它不是完全獨立的變異證據。相鄰 $\mathrm{MR}$ 共享一個觀測值而有依賴，$\mathrm{MR}$ 圖的連續規則與 $\mathrm{ARL}$ 不能照搬獨立常態理論。文獻也指出 $\mathrm{MR}$ 圖作為獨立監測工具的額外效益有限 [1]；本書仍介紹它，因為它是常見實務搭配。
+
+## 公式
+
+以基準期 $x_1,\ldots,x_m$ 計算
+
+$$MR_i=|x_i-x_{i-1}|,\quad i=2,\ldots,m,\qquad\overline{MR}=\frac1{m-1}\sum_{i=2}^mMR_i,$$
+$$\hat\sigma=\overline{MR}/1.128.$$
+
+$I$ 圖：$\mathrm{CL}=\bar x$，$\mathrm{LCL}/\mathrm{UCL}=\bar x\mp3\hat\sigma$。$\mathrm{MR}$ 圖：$\mathrm{CL}=\overline{MR}$、$\mathrm{LCL}=0$、$\mathrm{UCL}=3.267\overline{MR}$。常數適用移動窗寬 $2$；換窗寬就必須換常數。第一筆沒有 $\mathrm{MR}$。
+
+## R 範例
+
+```{r}
+#| label: i-mr
+#| fig-height: 6.5
+set.seed(104)
+mI <- 100
+base_I <- rnorm(mI, 10, .5)
+new_I <- c(rnorm(20, 10, .5), rnorm(30, 11, .5))
+xx <- c(base_I, new_I)
+mrbar <- mean(abs(diff(base_I)))
+mu_I <- mean(base_I); sigma_I <- mrbar / 1.128
+oldpar <- par(mfrow = c(2, 1), mar = c(4.5, 4.5, 3.5, 1))
+tab_I <- spc_plot(xx, mu_I, mu_I - 3 * sigma_I, mu_I + 3 * sigma_I,
+                  "Individuals chart", "Value", mI)
+# MR 的第 1 個繪圖點對應原始第 2 筆，因此分界在 mI - 1。
+tab_MR <- spc_plot(abs(diff(xx)), mrbar, 0, 3.267 * mrbar,
+                   "Moving range chart (width 2)", "MR", mI - 1)
+par(oldpar)
+rbind(I = report(tab_I, mI), MR = report(tab_MR, mI - 1))
+```
+
+**如何讀輸出：**監測期第 $21$ 點起均值增加；比較 $I$ 圖的持續偏高與 $\mathrm{MR}$ 圖可能只在轉換附近增大的差別。若資料右偏嚴重，$I$ 圖對稱界限不再有常態三標準差的誤報特性，應評估適當分布或分位數方法。
+
+#$p$ 不合格率圖
+
+## 何時使用、條件與判讀
+
+每件只有合格／不合格結果；每期分母 $n_i$ 可以改變。例如每天抽查不同件數的產品，監測不合格比例。假設 $D_i\sim \mathrm{Binomial}(n_i,p_0)$、同組每件具有相同不合格機率，且觀測間近似獨立 [10]。
+
+不同供應商、產品難度或病人風險混合，可能使共同 $p_0$ 假設失效；分母很大時，微小異質性也會產生大量警報。下側警報可能表示改善，也可能是漏報、判定標準放寬或風險組成改變。
+
+## 公式
+
+$$\hat p_i=D_i/n_i,\qquad\bar p=\frac{\sum_{i\in I}D_i}{\sum_{i\in I}n_i},$$
+$$CL_i=\bar p,\quad LCL_i=\max\left(0,\bar p-3\sqrt{\frac{\bar p(1-\bar p)}{n_i}}\right),$$
+$$UCL_i=\min\left(1,\bar p+3\sqrt{\frac{\bar p(1-\bar p)}{n_i}}\right).$$
+
+分母不同時，不能直接平均每日比例來估計共同不合格機率；應用總不合格品數除以總檢查件數。樣本數越大，界限通常越窄。
+
+## R 範例：逐點分母
+
+```{r}
+#| label: p-chart
+set.seed(105)
+n0p <- sample(150:300, 100, replace = TRUE)
+d0p <- rbinom(length(n0p), n0p, .04)
+p0 <- sum(d0p) / sum(n0p)
+n1p <- sample(150:300, 50, replace = TRUE)
+d1p <- rbinom(50, n1p, c(rep(.04, 20), rep(.09, 30)))
+se_p <- sqrt(p0 * (1 - p0) / n1p)
+tab_p <- spc_plot(d1p / n1p, p0, pmax(0, p0 - 3 * se_p),
+                  pmin(1, p0 + 3 * se_p), "p chart: varying n", "Proportion")
+report(tab_p)
+head(data.frame(n = n1p, D = d1p, tab_p), 8)
+```
+
+**如何讀輸出：**Phase II 第 $21$ 點起不合格機率由 $0.04$ 增至 $0.09$。界限上下起伏主要來自分母改變，並非每天重估基準。請同時看比例、分母及訊號，不只比較原始不合格件數。
+
+若 $n_i\bar p$ 或 $n_i(1-\bar p)$ 很小，對稱三標準差近似可能差；常見的「至少 $5$」只是粗略近似檢查，不能保證尾端誤報率準確。稀疏資料請見後面的精確分位數界限。
+
+# $np$ 不合格品數圖
+
+## 何時使用、條件與判讀
+
+每次固定檢查相同 $n$ 件，直接監測不合格品數。模型與 $p$ 圖相同，但縱軸是件數；若 $n$ 改變，改用 $p$ 圖或明確設計變動 $np$ 界限，不可沿用固定水平線。
+
+## 公式
+
+$$\bar p=\frac{\sum_{i\in I}D_i}{mn},\quad \mathrm{CL}=n\bar p,$$
+$$\mathrm{LCL}=\max\{0,n\bar p-3\sqrt{n\bar p(1-\bar p)}\},$$
+$$\mathrm{UCL}=\min\{n,n\bar p+3\sqrt{n\bar p(1-\bar p)}\}.$$
+
+水平界限可以是小數。實際觀測為整數，應依「嚴格大於 $\mathrm{UCL}$、嚴格小於 $\mathrm{LCL}$」判定；不要任意四捨五入後又改成含等號判警，否則誤報率會改變。
+
+## R 範例
+
+```{r}
+#| label: np-chart
+set.seed(106)
+n_np <- 200
+D0 <- rbinom(100, n_np, .03)
+p_np <- sum(D0) / (length(D0) * n_np)
+D1 <- rbinom(50, n_np, c(rep(.03, 20), rep(.08, 30)))
+center_np <- n_np * p_np
+sd_np <- sqrt(n_np * p_np * (1 - p_np))
+tab_np <- spc_plot(D1, center_np, max(0, center_np - 3 * sd_np),
+                   min(n_np, center_np + 3 * sd_np), "np chart", "Nonconforming units")
+report(tab_np)
+```
+
+**如何讀輸出：**第 $21$ 個監測點起真實不合格機率增加。同一件有三個缺點仍只計為一件不合格品；若想計三個缺點，應使用 $c$／$u$ 的資料定義。
+
+# $c$ 缺點數圖
+
+## 何時使用、條件與判讀
+
+每期檢查的面積、件數、時間或其他缺點機會固定，計算缺點總數，例如每片同面積玻璃的瑕疵點。假設每期 $C_i\sim \mathrm{Poisson}(c_0)$，不同機會／期別近似獨立，事件率在基準條件下穩定 [9]。
+
+Poisson 的平均數等於變異數是模型性質，不是所有計數資料的必然性質。成串瑕疵、不同材料混用或偵測能力變動都可能造成過度離散。
+
+## 公式
+
+$$\bar c=\frac1m\sum_{i\in I}C_i,\qquad \mathrm{CL}=\bar c,$$
+$$\mathrm{LCL}=\max(0,\bar c-3\sqrt{\bar c}),\qquad \mathrm{UCL}=\bar c+3\sqrt{\bar c}.$$
+
+## R 範例
+
+```{r}
+#| label: c-chart
+set.seed(107)
+C0 <- rpois(100, 8)
+c0 <- mean(C0)
+C1 <- rpois(50, c(rep(8, 20), rep(15, 30)))
+tab_c <- spc_plot(C1, c0, max(0, c0 - 3 * sqrt(c0)), c0 + 3 * sqrt(c0),
+                  "c chart: constant opportunity", "Defects")
+report(tab_c)
+```
+
+**如何讀輸出：**第 $21$ 個監測點起缺點平均數增加。若檢查面積加倍，缺點數增加本來就可能合理，此時不能照用同一張 $c$ 圖；應改用 $u$ 圖或其他暴露量模型。當 $\mathrm{LCL}$ 為零時，對稱三標準差 $c$ 圖可能完全無法對缺點減少發出下側訊號。
+
+# $u$ 單位缺點率圖
+
+## 何時使用、條件與判讀
+
+每期檢查機會不同，例如每卷不同長度布料的疵點，或不同運轉時數的設備故障。令 $e_i>0$ 為暴露量，假設 $C_i\sim \mathrm{Poisson}(e_i u_0)$；共同單位事件率合理，而且暴露量可比較 [11]。
+
+暴露量必須對應事件機會。不同面積但檢查方法不同，或觀測時間中設備未全程運轉，都可能使簡單的比例校正不足。
+
+## 公式
+
+$$u_i=C_i/e_i,\qquad\bar u=\frac{\sum_{i\in I}C_i}{\sum_{i\in I}e_i},\qquad CL_i=\bar u,$$
+$$LCL_i=\max\left(0,\bar u-3\sqrt{\frac{\bar u}{e_i}}\right),\qquad UCL_i=\bar u+3\sqrt{\frac{\bar u}{e_i}}.$$
+
+不能把各期缺點率簡單平均來估計共同事件率。若所有 $e_i=e$，$c$ 圖與 $u$ 圖僅差固定的縱軸縮放。
+
+## R 範例
+
+```{r}
+#| label: u-chart
+set.seed(108)
+e0 <- runif(100, 5, 20) # 例如以 100 平方公尺為一個暴露單位
+CU0 <- rpois(100, e0 * 1.2)
+u0 <- sum(CU0) / sum(e0)
+e1 <- runif(50, 5, 20)
+CU1 <- rpois(50, e1 * c(rep(1.2, 20), rep(2.2, 30)))
+se_u <- sqrt(u0 / e1)
+tab_u <- spc_plot(CU1 / e1, u0, pmax(0, u0 - 3 * se_u), u0 + 3 * se_u,
+                  "u chart: varying exposure", "Defects per exposure unit")
+report(tab_u)
+head(data.frame(exposure = e1, count = CU1, tab_u), 8)
+```
+
+**如何讀輸出：**第 $21$ 個監測點起每單位事件率增加；較大暴露量提供較多資訊，因此界限較窄。$e_i=0$ 時缺點率沒有定義，須排除於這張圖並另行記錄停機等狀態，不可填入零率。
+
+# 處理計數圖的稀疏與離散問題
+
+## 精確分布分位數界限
+
+若基準參數已知，對 Binomial／Poisson 使用分位數可以控制尾端機率；但離散分布無法任意精準達到指定 $\alpha$。定義
+
+$$L_i=F_i^{-1}(\alpha/2),\qquad U_i=F_i^{-1}(1-\alpha/2),$$
+
+採用 $D_i<L_i$ 或 $D_i>U_i$ 判警。R 的 `qbinom()`／`qpois()` 採離散分位數定義，搭配嚴格不等號通常給出不超過名目單尾機率的保守界限。代入估計參數後，仍有估計不確定性；「精確」指分布計算，不表示估計後的實際整體誤報率也精確。
+
+```{r}
+#| label: exact-count-limits
+alpha <- 2 * pnorm(-3)
+
+# p：直接沿用前面的基準 p0 與監測資料。
+L_D <- qbinom(alpha / 2, size = n1p, prob = p0)
+U_D <- qbinom(1 - alpha / 2, size = n1p, prob = p0)
+tab_p_exact <- spc_plot(d1p / n1p, p0, L_D / n1p, U_D / n1p,
+                        "p chart: binomial quantile limits", "Proportion")
+
+# u：每一期 Poisson 平均數是 exposure * u0。
+L_C <- qpois(alpha / 2, lambda = e1 * u0)
+U_C <- qpois(1 - alpha / 2, lambda = e1 * u0)
+tab_u_exact <- spc_plot(CU1 / e1, u0, L_C / e1, U_C / e1,
+                        "u chart: Poisson quantile limits", "Rate")
+# np 使用固定 n 的 qbinom；c 使用固定 lambda 的 qpois，判定邏輯相同。
+```
+
+若 Phase I 全部零事件，$\bar p=0$／$\bar u=0$ 會導致退化界限，不能直接據此認定真實機率或事件率為零。應增加觀測資訊、採經審核的外部目標或合適的稀有事件／貝氏方法，並評估不確定性。
+
+## 過度與不足離散
+
+可先用基準期 Pearson 殘差平方和除以自由度作粗略診斷：
+
+$$\hat\phi_p=\frac1{m-1}\sum_i\frac{(D_i-n_i\bar p)^2}{n_i\bar p(1-\bar p)},\quad
+\hat\phi_u=\frac1{m-1}\sum_i\frac{(C_i-e_i\bar u)^2}{e_i\bar u}.$$
+
+```{r}
+#| label: dispersion
+stopifnot(p0 > 0, p0 < 1, u0 > 0)
+phi_p <- sum((d0p - n0p * p0)^2 / (n0p * p0 * (1 - p0))) / (length(d0p) - 1)
+phi_u <- sum((CU0 - e0 * u0)^2 / (e0 * u0)) / (length(CU0) - 1)
+data.frame(model = c("Binomial", "Poisson"), Pearson_dispersion = c(phi_p, phi_u))
+```
+
+這只是診斷線索；小期望數與依賴會影響近似。值大於 $1$ 不表示可以立刻把界限乘 $\sqrt{\hat\phi}$：先查混合來源、群聚、非穩定及風險組成。Laney $p$′／$u$′、beta-binomial、negative binomial 或其他條件模型是進階選項，須另作基準與偵測校準，不能把特殊原因吸收到更寬的界限中。
+
+# $\mathrm{EWMA}$ 指數加權移動平均圖
+
+## 何時使用、條件與判讀
+
+想偵測較小、持續的均值變化，尤其單點不容易超過 Shewhart 界限時使用。$\mathrm{EWMA}$ 對所有過去資訊給權重，越舊權重越小；$\lambda$ 小代表較長記憶，但並非對所有變化都更快 [4,13]。
+
+輸入可以是個別值，也可以是子組平均。若輸入為子組平均，$s_Y$ 應為 $\hat\sigma/\sqrt n$，不是個體標準差。傳統公式假設輸入獨立、穩定且具有固定變異；變動 $n_i$ 不能直接使用固定 $s_Y$ 公式。
+
+## 公式與設計
+
+以固定 $Z_0=\mu_0$ 起始：
+
+$$Z_t=\lambda Y_t+(1-\lambda)Z_{t-1},\qquad0<\lambda\le1.$$
+
+在獨立且 $\mathrm{Var}(Y_t)=s_Y^2$ 時，
+
+$$\mathrm{Var}(Z_t)=s_Y^2\frac{\lambda}{2-\lambda}\{1-(1-\lambda)^{2t}\}.$$
+
+$$CL_t=\mu_0,\qquad LCL_t/UCL_t=\mu_0\mp Ls_Y\sqrt{\frac{\lambda}{2-\lambda}\{1-(1-\lambda)^{2t}\}}.$$
+
+當 $t\to\infty$，括號內的時間修正趨近 $1$，得到穩態界限。起始界限較窄；若使用 head start 或隨機初值，必須重新確認均值、變異及警報校準。$\lambda=1$ 時退化為以 $L$ 為倍率的 Shewhart 位置圖。
+
+教學常試 $\lambda=0.1$ 或 $0.2$，$L$ 約 $3$，但參數要依目標偏移及 $ARL_0$ 選擇；**$L=3$ 不保證 $\mathrm{EWMA}$ 的 $\mathrm{ARL}$ 等於 $370$**。有記憶的統計量相互相關 [4]。
+
+## R 範例
+
+```{r}
+#| label: ewma
+set.seed(109)
+base_E <- rnorm(200, 0, 1)
+mu_E <- mean(base_E)
+sd_E <- sd(base_E) / c4(length(base_E))
+yE <- c(rnorm(30, 0, 1), rnorm(70, .6, 1))
+lambda <- .2; L <- 3
+zE <- numeric(length(yE)); prev <- mu_E
+for (i in seq_along(yE)) {
+  zE[i] <- lambda * yE[i] + (1 - lambda) * prev
+  prev <- zE[i]
+}
+tE <- seq_along(yE)
+se_E <- sd_E * sqrt(lambda / (2 - lambda) * (1 - (1 - lambda)^(2 * tE)))
+tab_E <- spc_plot(zE, mu_E, mu_E - L * se_E, mu_E + L * se_E,
+                  "EWMA: time-dependent limits", "EWMA")
+report(tab_E)
+# 對照同一段資料的 Shewhart 個別值位置圖。
+tab_EI <- spc_plot(yE, mu_E, mu_E - 3 * sd_E, mu_E + 3 * sd_E,
+                   "Same data: Shewhart chart", "Value")
+report(tab_EI)
+```
+
+**如何讀輸出：**第 $31$ 點起均值增加 $0.6$；比較 $\mathrm{EWMA}$ 與個別值圖的警報時間。本例只是單次實現，不能用一次誰先警報就宣稱哪張圖一定較好；公平比較應先匹配 $ARL_0$，再比較多次模擬的延遲。
+
+警報後的連續超界值因記憶而高度相關，不是多個獨立事件。本書範例為呈現路徑而繼續繪圖；實務應在警報時調查，確認處置後是否重設 $Z_0$。
+
+變動輸入標準誤時，固定初值下可遞迴計算 $V_t=\lambda^2s_{Y,t}^2+(1-\lambda)^2V_{t-1}$、$V_0=0$；這仍須輸入獨立及正確的逐點變異模型。
+
+# $\mathrm{CUSUM}$ 累積和圖
+
+## 何時使用、條件與判讀
+
+要針對某個有實務重要性的持續偏移設計快速偵測時使用。Page 的連續檢驗思想是經典基礎 [5]；本書用常態均值的雙側 tabular $\mathrm{CUSUM}$，並非所有分布的通用公式。
+
+將輸入標準化為 $W_t=(Y_t-\mu_0)/s_Y$，再監測累積偏差。使用子組平均時，$s_Y$ 是子組平均標準誤。假定基準輸入獨立、近似常態且尺度穩定。
+
+## 公式與單位
+
+$$C_t^+=\max\{0,C_{t-1}^++W_t-k\},\qquad
+C_t^-=\max\{0,C_{t-1}^--W_t-k\},$$
+
+初值 $C_0^+=C_0^-=0$。當 $C_t^+>h$ 或 $C_t^->h$ 時警報。兩條累積量均為非負；本書將兩條都畫在零以上。
+
+若目標偏移為 $\delta$ 個**輸入統計量標準差**，常態模型下常取 $k=\delta/2$。$h$ 決定警報門檻，要依期望 $ARL_0$ 與偵測目標校準。$k=0.5,h=5$ 是常見示範起點，不是每種資料都適用的標準。若用原始單位累積，參數為 $K=ks_Y$、$H=hs_Y$，不能把兩組單位混用。
+
+若工程關心的是個體均值改變 $\Delta$，而每組 $n$ 件，則 $\delta=\Delta/(\sigma/\sqrt n)$；不能直接把 $\Delta/\sigma$ 當成子組平均的標準化偏移。
+
+## R 範例
+
+```{r}
+#| label: cusum
+#| fig-height: 6.5
+set.seed(110)
+base_CU <- rnorm(200)
+mu_CU <- mean(base_CU)
+sd_CU <- sd(base_CU) / c4(length(base_CU))
+yCU <- c(rnorm(30), rnorm(70, 1))
+w <- (yCU - mu_CU) / sd_CU
+k <- .5; h <- 5
+cp <- cm <- numeric(length(w)); pp <- pm <- 0
+for (i in seq_along(w)) {
+  cp[i] <- max(0, pp + w[i] - k)
+  cm[i] <- max(0, pm - w[i] - k)
+  pp <- cp[i]; pm <- cm[i]
+}
+oldpar <- par(mfrow = c(2, 1), mar = c(4.5, 4.5, 3.5, 1))
+tab_cp <- spc_plot(cp, 0, 0, h, "Upper CUSUM", "C+")
+tab_cm <- spc_plot(cm, 0, 0, h, "Lower CUSUM (nonnegative)", "C-")
+par(oldpar)
+sig_CU <- which(cp > h | cm > h)
+data.frame(first_signal = if (length(sig_CU)) sig_CU[1] else NA_integer_)
+```
+
+**如何讀輸出：**第 $31$ 點起正向均值增加，主要看 $C^+$ 是否累積到 $h$；$C^-$ 監測負向偏移。單次大值也可能觸發警報，因此警報不是持續偏移已被證明。下側只監測累積下降，不是監測「$C^+$ 低於零」。
+
+程式在警報後繼續累積，以便展示路徑；正式系統應在首次警報進入處置程序，再決定如何重啟。無法調查卻一再自動歸零，可能丟失關鍵訊息。
+
+# 自相關資料的模型與殘差圖
+
+## 何時使用與限制
+
+高頻溫度、流量或化學製程常有慣性，相鄰值不是獨立。正自相關時，$\mathrm{MR}$ 可能低估個別值的長期波動，傳統 $I$ 圖因此太敏感。Alwan 與 Roberts 建議建模系統性時間結構，再對殘差監測，並另外觀看擬合／預測值的變動 [6]。
+
+不是所有相關性都該建模消除；若它來自可移除的設備異常，應先改善製程。也不可把真實偏移當成「趨勢」一起學進模型。本書依 [1] 將 Phase I 分為訓練與校準：前者估計模型，後者用固定模型產生一步預測誤差並設定界限。Phase II 仍固定參數。
+
+## AR($1$) 教學模型與公式
+
+$$X_t=\mu+\phi(X_{t-1}-\mu)+\varepsilon_t,\quad |\phi|<1,\quad
+\varepsilon_t\overset{iid}{\sim}N(0,\sigma_\varepsilon^2).$$
+
+以訓練集估計 $\hat\mu,\hat\phi$；對每個後續點，先用上一筆已知觀測作預測：
+
+$$\widehat X_{t|t-1}=\hat\mu+\hat\phi(X_{t-1}-\hat\mu),\qquad
+r_t=X_t-\widehat X_{t|t-1}.$$
+
+以校準集殘差估計 $\bar r_{cal}$ 及 $\hat\sigma_r$；監測界限為 $\bar r_{cal}\pm3\hat\sigma_r$。校準殘差若出現明顯偏差、相關或異質變異，應先修正模型，不能僅靠移動中心線掩蓋失配。
+
+## R 範例：固定參數的一步預測
+
+```{r}
+#| label: residual-chart
+#| fig-height: 6.5
+set.seed(111)
+Ntrain <- 250; Ncal <- 150; Nmon <- 100
+# 前 400 點為固定參數 AR(1)；監測第 41 點起觀測層級增加 1.5。
+xAR <- as.numeric(arima.sim(model = list(ar = .65),
+                           n = Ntrain + Ncal + Nmon, sd = 1)) + 20
+xAR[(Ntrain + Ncal + 41):length(xAR)] <-
+  xAR[(Ntrain + Ncal + 41):length(xAR)] + 1.5
+train <- xAR[seq_len(Ntrain)]
+fit <- arima(train, order = c(1, 0, 0), include.mean = TRUE, method = "ML")
+phi_hat <- unname(coef(fit)["ar1"])
+mu_hat <- unname(coef(fit)["intercept"])
+# 在 stats::arima 的平穩 AR(1) 中，intercept 是均值 mu，
+# 不是回歸寫法 X_t = a + phi*X_(t-1) 中的 a。
+idx_cal <- (Ntrain + 1):(Ntrain + Ncal)
+idx_mon <- (Ntrain + Ncal + 1):length(xAR)
+pred_one <- function(idx) mu_hat + phi_hat * (xAR[idx - 1] - mu_hat)
+r_cal <- xAR[idx_cal] - pred_one(idx_cal)
+r_mon <- xAR[idx_mon] - pred_one(idx_mon)
+rc <- mean(r_cal); sr <- sd(r_cal) / c4(length(r_cal))
+oldpar <- par(mfrow = c(2, 1), mar = c(4.5, 4.5, 3.5, 1))
+acf(train, main = "Training data: autocorrelation")
+acf(r_cal, main = "Calibration residuals: autocorrelation")
+par(oldpar)
+# 未拒絕虛無假設不代表已證明獨立；合併圖形及製程知識判斷。
+print(Box.test(r_cal, lag = 15, type = "Ljung-Box", fitdf = 0))
+print(shapiro.test(r_cal))
+tab_res <- spc_plot(r_mon, rc, rc - 3 * sr, rc + 3 * sr,
+                    "Fixed AR(1): monitoring residuals", "One-step residual")
+report(tab_res)
+plot(seq_along(idx_mon), pred_one(idx_mon), type = "l", col = "#235789",
+     xlab = "Monitoring observation", ylab = "Prediction",
+     main = "Fixed-model one-step predictions")
+abline(v = 40.5, lty = 3)
+```
+
+**如何讀輸出：**原始資料 $\mathrm{ACF}$ 通常明顯，校準殘差 $\mathrm{ACF}$ 應改善；若未改善，這張殘差圖的界限就不可信。本例模型只以訓練資料估計，校準及監測的每一步預測都只用前一筆資料，不偷看未來。使用前一筆新觀測更新預測狀態，與重新估計 $\mu,\phi$ 是不同的動作。
+
+觀測層級持續偏移 $\Delta$ 時，偏移初始一步殘差可能增加 $\Delta$，後續平均殘差約增加 $(1-\phi)\Delta$；高自相關時可能較難偵測。因此不應只看殘差是否超界，也要保留原始值、一步預測值與製程情境。若要對小偏移加 $\mathrm{EWMA}$／$\mathrm{CUSUM}$，必須在殘差模型成立後重新校準。
+
+$\mathrm{ARIMA}$ 的一般情況須按模型使用正確的遞迴預測狀態與預測誤差變異；本例的一行 AR($1$) 公式不能直接當成所有 $\mathrm{ARIMA}$ 的實作 [14]。
+
+# 評估參數估計與偵測表現
+
+## 為什麼不能只報名目 $\mathrm{ARL}$
+
+Jensen 等人綜述參數估計對管制圖的影響 [3]。不同 Phase I 資料會得到不同中心線與界限，所以正式監測的實際誤報與偵測能力也不同。應分清：給定已建好的基準之條件式表現，與跨很多可能基準之平均表現。
+
+以下用 $I$ 型位置圖簡化問題：基準及未變監測點都來自 $N(0,1)$，基準平均數及 `sd()/c4` 估計尺度。因每次模擬的界限固定、監測點獨立，可計算該基準下的條件式誤報率，無須模擬漫長序列。
+
+```{r}
+#| label: estimation-uncertainty
+set.seed(112)
+conditional_arl <- function(m, B = 1500) {
+  a <- replicate(B, {
+    b <- rnorm(m)
+    mu <- mean(b); sg <- sd(b) / c4(m)
+    low <- mu - 3 * sg; high <- mu + 3 * sg
+    pfalse <- pnorm(low) + pnorm(high, lower.tail = FALSE)
+    1 / pfalse
+  })
+  data.frame(baseline_n = m, q10 = unname(quantile(a, .1)),
+             median = median(a), q90 = unname(quantile(a, .9)), mean_ARL = mean(a))
+}
+do.call(rbind, lapply(c(25, 100, 500), conditional_arl))
+```
+
+**如何讀輸出：**看各基準長度下 $\mathrm{ARL}$ 分布的寬度，而不是只看平均值是否接近 $370$。小基準可造成很寬或很窄的界限；平均 $\mathrm{ARL}$ 也可能被少數極寬界限拉高。這是簡化的已知真實分布教學模擬，沒有涵蓋 Phase I 選樣、刪點、自相關或非常態問題。
+
+## $\mathrm{CUSUM}$／$\mathrm{EWMA}$ 的 $\mathrm{ARL}$ 模擬
+
+先在明確模型下比較固定參數的圖。本例使用已知 $\mu_0=0,\sigma_0=1$，從第 $1$ 點起均值固定為 `delta`。$\delta=0$ 為未變情境，$\delta=1$ 為立即偏移一個輸入標準差；這是 zero-state $\mathrm{ARL}$，不是運行一段時間後才偏移的 steady-state delay。
+
+```{r}
+#| label: arl-simulation
+run_length <- function(chart = c("EWMA", "CUSUM"), delta = 0,
+                       max_steps = 10000, lambda = .2, L = 3, k = .5, h = 5) {
+  chart <- match.arg(chart)
+  z <- cp <- cm <- 0
+  for (t in seq_len(max_steps)) {
+    y <- rnorm(1, delta, 1)
+    if (chart == "EWMA") {
+      z <- lambda * y + (1 - lambda) * z
+      limit <- L * sqrt(lambda / (2 - lambda) * (1 - (1 - lambda)^(2 * t)))
+      hit <- abs(z) > limit
+    } else {
+      cp <- max(0, cp + y - k); cm <- max(0, cm - y - k)
+      hit <- cp > h || cm > h
+    }
+    if (hit) return(c(time = t, signaled = 1))
+  }
+  c(time = max_steps, signaled = 0)
+}
+mc_arl <- function(chart, delta, B = 400, ...) {
+  a <- replicate(B, run_length(chart, delta, ...))
+  tm <- a["time", ]; hit <- a["signaled", ]
+  data.frame(chart = chart, shift = delta, replications = B,
+             restricted_mean_RL = mean(tm),
+             MCSE_restricted_mean = sd(tm) / sqrt(B),
+             censor_fraction = mean(hit == 0))
+}
+set.seed(113)
+rbind(mc_arl("EWMA", 0), mc_arl("CUSUM", 0),
+      mc_arl("EWMA", 1), mc_arl("CUSUM", 1))
+```
+
+`restricted_mean_RL` 是截止 `max_steps` 的限制平均；若任何序列尚未警報，不能把它當成完整 $\mathrm{ARL}$。此時增加上限或使用適當的截尾分析。$400$ 次只適合教學，正式比較需增加次數、報告 Monte Carlo 誤差，並先調整 $L$／$h$ 匹配未變 $\mathrm{ARL}$；本表的預設參數**沒有**保證匹配，因此不能直接以其偵測速度排行。
+
+實務上還要把參數估計、實際抽樣間隔、非常態、自相關及聯合圖規則一起帶入模擬；若關心啟動一段時間後的變化，應明確模擬偏移時間及偏移前已警報的處理。
+
+# 把選圖與判讀變成可重複工作
+
+## 每次分析的技能卡
+
+1. **定義任務：**品質特性、監測單位、改善方向、重要偏移大小、可容忍誤報及處置成本。
+2. **檢查資料：**時間排序、分母、暴露量、缺漏、重複、量測定義及產品／設備來源。
+3. **建立基準：**界定 Phase I 期間、合理分組與穩定機制；調查異常而非自動刪點。
+4. **檢查模型：**分布、獨立性、變異、離散程度及共同參數是否合理；必要時分層或建模。
+5. **選圖與算界限：**列出公式、常數、單位、樣本數設定、參數估計方法及警報規則。
+6. **驗證監測設計：**檢查名目與實際誤報、重要偏移偵測速度，以及參數不確定性。
+7. **固定後監測：**保留基準版本；Phase II 每個新點只依當時可得資料更新統計量。
+8. **調查並維護：**記錄警報、可能原因、確認結果、處置及重啟方式；有證據時回到 Phase I。
+
+## 分析報告最少應包含什麼
+
+| 項目 | 應明確寫出的內容 |
+|---|---|
+| 資料 | 變數及單位、期間、抽樣頻率、子組、分母／暴露量 |
+| 基準 | 選取理由、排除與調查紀錄、Phase I 與 II 的分界 |
+| 模型 | 分布、依賴、分層、診斷及未解決問題 |
+| 管制圖 | 圖型、公式、常數、估計參數、界限版本及判讀規則 |
+| 結果 | 首次警報、偏移方向、統計及實務意義，避免直接宣稱原因 |
+| 行動 | 調查對象、產品風險處置、改善及基準維護計畫 |
+| 重現 | R／套件版本、程式、隨機種子、原始資料及處理紀錄 |
+
+## 常見錯誤與修正
+
+| 錯誤 | 為何有問題 | 修正 |
+|---|---|---|
+| 用規格當 $\mathrm{UCL}$／$\mathrm{LCL}$ | 混淆品質要求與基準變異 | 分開呈現兩類界限 |
+| 用全部資料重算每張監測圖 | 讓變化污染基準 | 固定 Phase I，前瞻監測 |
+| 用全體 `sd()` 代替子組內變異 | 組間差異可能放寬均值圖 | 使用合理的組內估計 |
+| $p$／$u$ 圖直接平均每日率 | 分母不同時估計目標不同 | 總數除以總分母 |
+| $np$／$c$ 圖遇分母改變仍用水平線 | 忽略抽樣／暴露量變化 | 改用 $p$／$u$ 或逐點模型 |
+| 不合格品數當成缺點數 | Binomial 與 Poisson 定義不同 | 先確認每件是否可重複計數 |
+| $\mathrm{EWMA}$／$\mathrm{CUSUM}$ 用錯尺度 | 個體 $\mathrm{SD}$ 與平均 $\mathrm{SE}$ 不同 | 明確定義輸入與 $s_Y$ |
+| 把 $\mathrm{ACF}$ 顯著直接視為特殊原因 | 可能是基準慣性或模型不足 | 結合製程知識調查或建模 |
+| 加很多判讀規則卻沿用 $\mathrm{ARL}$ $370$ | 多重規則提高誤報 | 事先選規則並聯合校準 |
+| 沒紅點就宣稱製程穩定 | 偵測力及模型可能不足 | 表述為尚未出現指定規則的警報 |
+
+# 練習與解答提示
+
+## 練習題
+
+1. 每小時連抽 $5$ 件量測直徑，關心均值及變異，應選哪組圖？如果不同機台混在同一子組，會有什麼問題？
+2. 每日檢查件數介於 $50\text{–}500$ 件，每件只有通過／未通過；為什麼不能使用固定 $np$ 圖？
+3. 每卷布長度不同，一卷可以有多個疵點；選 $p$ 還是 $u$？應記錄哪些欄位？
+4. $I$ 圖有連續高低變化，$\mathrm{ACF}$ 第一階約 $0.7$；如何判斷應改善製程還是建立殘差模型？
+5. 每組 $n=4$、個體標準差 $\sigma=2$；工程希望偵測均值增加 $1$。以子組平均做常態 $\mathrm{CUSUM}$ 時，$\delta$ 及 $k$ 為何？
+6. $\bar p=0.02$，$n_i=100$ 與 $400$ 時，$p$ 圖的三標準差上限各是多少？
+7. 某張圖 Phase I 全零缺點，是否可把後面任何一個缺點都判定為特殊原因？
+8. 比較 $\mathrm{EWMA}$ 與 $\mathrm{CUSUM}$，一張 $ARL_0=100$，另一張 $ARL_0=500$，誰先偵測是否能直接作優劣結論？
+9. 將 $\mathrm{EWMA}$ 範例的 $\lambda$ 改為 $0.05$、$0.5$，重跑多次；為什麼單次圖不能建立一般結論？
+10. 把 $u$ 圖基準改為混合兩種風險來源，觀察 Pearson 離散指標；先擴大界限還是先查來源？
+
+## 解答提示
+
+1. 可用 $\bar{X}\text{–}R$，亦可優先考慮 $\bar{X}\text{–}S$；混合機台可能使組內變異包含機台差異，掩蓋真正組間變化。先明確定義監測對象並分組。
+2. $n$ 改變會改變不合格件數的平均及變異；用 $p$ 圖搭配各期 $n$，或另行設計變動件數界限。
+3. $u$ 圖；記錄時間、卷號、長度／面積、缺點數、產品與檢查方法。模型仍須檢查。
+4. 回查設備機理、抽樣設計、漂移及特殊變更；若是正常慣性，訓練與校準模型並檢查一步殘差；若可移除異常造成相關，先改善。
+5. 平均值標準誤 $s_Y=2/\sqrt4=1$，$\delta=1/1=1$，可取 $k=0.5$；$h$ 尚須校準。
+6. $0.02+3\sqrt{0.02(0.98)/100}=0.062$；$n=400$ 時為 $0.041$。期望不合格數小時仍應考慮離散界限。
+7. 不可以直接套零變異基準；真實事件率未必是零，應擴充資訊及採合適方法。
+8. 不能；先匹配誤報設計及初始狀態，再比較變化後延遲與實務損失。
+9. 記憶長短、初始條件、門檻及隨機路徑都影響結果；要匹配誤報率並多次模擬。
+10. 先查可解釋來源、分層及基準穩定性；不要把異常直接吸收為較寬界限。
+
+# 文獻閱讀地圖
+
+| 文獻 | 本書使用位置 | 閱讀時帶著的問題 |
+|---|---|---|
+| [1] Zwetsloot 等，$2024$ | 四階段架構、選圖、假設、模型校準及維護 | 如何讓圖成為可長期運作的監測流程？ |
+| [2] Jones-Farmer 等，$2014$ | 合理分組、Phase I、穩定性與基準建立 | 為何 Phase I 不只是估計均值及標準差？ |
+| [3] Jensen 等，$2006$ | 估計不確定性、條件與整體 $\mathrm{ARL}$ | 同樣名目界限為何不同使用者表現不同？ |
+| [4] Lucas & Saccucci，$1990$ | $\mathrm{EWMA}$、初始值、參數及組合設計 | 如何在誤報與小偏移偵測之間取捨？ |
+| [5] Page，$1954$ | 連續檢驗與 $\mathrm{CUSUM}$ | 為何累積證據能改善持續小變化偵測？ |
+| [6] Alwan & Roberts，$1988$ | 自相關、時間序列模型與殘差 | 怎樣區分正常動態結構與偏離該結構的變化？ |
+
+閱讀提示：[4] 還討論 fast initial response、與 Shewhart 合用及離群值保護；本書未實作這些增強設計。[5] 是理論起點，本書的標準化雙側表格式 $\mathrm{CUSUM}$ 是便於實作的教學整理。[6] 的模型想法不等於所有有趨勢資料都能以差分後畫圖解決。
+
+# 參考資料
+
+[1] Zwetsloot, $I$. M., Jones-Farmer, L. A., & Woodall, W. H. ($2024$). Monitoring univariate processes using control charts: Some practical issues and advice. *Quality Engineering, $36$*($3$), $487\text{–}499$. [https://doi.org/10.1080/08982112.2023.2238049](https://doi.org/10.1080/08982112.2023.2238049). 線上先刊於 $2023$；本書按正式卷期使用 $2024$ 年。
+
+[2] Jones-Farmer, L. A., Woodall, W. H., Steiner, S. H., & Champ, C. W. ($2014$). An overview of Phase I analysis for process improvement and monitoring. *Journal of Quality Technology, $46$*($3$), $265\text{–}280$. [https://doi.org/10.1080/00224065.2014.11917969](https://doi.org/10.1080/00224065.2014.11917969).
+
+[3] Jensen, W. A., Jones-Farmer, L. A., Champ, C. W., & Woodall, W. H. ($2006$). Effects of parameter estimation on control chart properties: A literature review. *Journal of Quality Technology, $38$*($4$), $349\text{–}364$. [https://doi.org/10.1080/00224065.2006.11918623](https://doi.org/10.1080/00224065.2006.11918623).
+
+[4] Lucas, J. M., & Saccucci, M. S. ($1990$). Exponentially weighted moving average control schemes: Properties and enhancements. *Technometrics, $32$*($1$), $1\text{–}12$. [https://doi.org/10.1080/00401706.1990.10484583](https://doi.org/10.1080/00401706.1990.10484583).
+
+[5] Page, E. S. ($1954$). Continuous inspection schemes. *Biometrika, $41$*($1$/$2$), $100\text{–}115$. [https://doi.org/10.1093/biomet/41.1-2.100](https://doi.org/10.1093/biomet/41.1-2.100).
+
+[6] Alwan, L. C., & Roberts, H. V. ($1988$). Time-series modeling for statistical process control. *Journal of Business & Economic Statistics, $6$*($1$), $87\text{–}95$. [https://doi.org/10.1080/07350015.1988.10509640](https://doi.org/10.1080/07350015.1988.10509640).
+
+## 補充公式與軟體文件
+
+[7] NIST/SEMATECH. *e-Handbook of Statistical Methods*, §$6.3.2.1$, Shewhart $\bar{X}$ and $R$ and $S$ Control Charts. [官方公式頁](https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc321.htm).
+
+[8] NIST/SEMATECH. *e-Handbook of Statistical Methods*, §$6.3.2.2$, Individuals Control Charts. [官方公式頁](https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc322.htm).
+
+[9] NIST/SEMATECH. *e-Handbook of Statistical Methods*, §$6.3.3.1$, Counts Control Charts. [官方公式頁](https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc331.htm).
+
+[10] NIST/SEMATECH. *e-Handbook of Statistical Methods*, §$6.3.3.2$, Proportions Control Charts. [官方公式頁](https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc332.htm).
+
+[11] NIST. *Dataplot Reference Manual*, U Control Chart. [官方 u 圖公式](https://www.itl.nist.gov/div898/software/dataplot/refman1/ch2/ucontrol.pdf).
+
+[12] NIST/SEMATECH. *e-Handbook of Statistical Methods*, §$6.3.2$, What are Variables Control Charts? [WECO 與趨勢規則](https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc32.htm).
+
+[13] NIST/SEMATECH. *e-Handbook of Statistical Methods*, §$6.3.1.3\text{–}6.3.1.4$. [CUSUM](https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc313.htm)、[EWMA](https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc314.htm). 本書 $\mathrm{EWMA}$ 使用含啟動期修正的變異公式，並以 [4] 為主要設計依據。
+
+[14] R Core Team. *R stats package documentation*. [ARIMA 模型與其他統計函式官方文件](https://stat.ethz.ch/CRAN/doc/manuals/r-release/packages/stats/refman/stats.html). 涵蓋本書使用的 `arima`、`arima.sim`、`acf`、`Box.test`、`qbinom`、`qpois` 等；已安裝版本也可用 `?arima` 等方式查閱。
+
+補充網頁查閱日：$2026$-$11$-$16$。參考文獻以原始論文卷期年為主，不以網站後來的數位上線年份替代。教材未附原論文 PDF，請使用原壓縮檔或以上合法來源取得。
+
+# 附錄：執行、替換資料與環境紀錄
+
+## 轉成 HTML
+
+安裝 R、Quarto，以及 R 套件 `knitr`、`rmarkdown` 後，在本檔所在資料夾執行：
+
+```{.bash}
+quarto render SPC-control-chart-textbook.qmd --to html
+```
+
+本檔的 HTML 設定為內嵌圖形與樣式，方便分享；數學式使用 MathJax，離線閱讀時仍可能需要瀏覽器已取得其資源。首次閱讀建議連網。若需 PDF，須另外設定 PDF 格式、中文字型及 LaTeX 環境；此 QMD 預設以 HTML 為交付格式。
+
+## 換成自己的資料
+
+例如 `data.csv` 含 `time`、`value`、`phase` 欄位，先確認排序與資料完整，再切開基準／監測：
+
+```{r}
+#| label: own-data-template
+#| eval: false
+dat <- read.csv("data.csv", stringsAsFactors = FALSE)
+dat$time <- as.POSIXct(dat$time, tz = "Asia/Taipei")
+stopifnot(!anyNA(dat[c("time", "value", "phase")]),
+          is.numeric(dat$value), all(is.finite(dat$value)),
+          all(dat$phase %in% c("I", "II")))
+dat <- dat[order(dat$time), ]
+stopifnot(!anyDuplicated(dat$time)) # 若有同時多筆，先定義子組，不能直接刪除。
+base <- dat$value[dat$phase == "I"]
+monitor <- dat$value[dat$phase == "II"]
+stopifnot(length(base) >= 2, length(monitor) >= 1,
+          max(dat$time[dat$phase == "I"]) < min(dat$time[dat$phase == "II"]))
+# 以下仍須先完成基準穩定性、分布及自相關檢查。
+sigma_hat <- mean(abs(diff(base))) / 1.128
+stopifnot(sigma_hat > 0)
+spc_plot(monitor, mean(base), mean(base) - 3 * sigma_hat,
+         mean(base) + 3 * sigma_hat, "My I chart", "Value")
+```
+
+子組圖須保留組號及組內原始值；$p$／$np$ 圖須保留 `nonconforming`、`inspected`；$c$／$u$ 圖須保留 `defects`、`exposure`。不要只留比例或每期平均，否則可能失去正確界限所需資訊。
+
+## 執行環境
+
+```{r}
+#| label: session-info
+sessionInfo()
+```

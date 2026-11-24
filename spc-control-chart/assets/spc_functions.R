@@ -1,0 +1,943 @@
+## =====================================================================
+## SPC 管制圖共用函式（依《SPC 管制圖技能教科書》）
+## 計算只用 base R（stats、utils）；畫圖用 ggplot2。
+## 本檔以「## ---- block: 名稱 ----」分段；scripts/assemble_report.py 會把
+## 各段插入報告中對應的段落，因此每段程式碼都出現在它說明的章節後面。
+## =====================================================================
+
+## ---- block: setup ----
+if (!requireNamespace("ggplot2", quietly = TRUE))
+  stop("需要 ggplot2 套件：請先在 R 執行 install.packages(\"ggplot2\")。")
+suppressPackageStartupMessages(library(ggplot2))
+options(width = 95, digits = 4)
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+# 常態母體下 E(S) = c4(n) * sigma，n >= 2。
+c4 <- function(n) {
+  stopifnot(all(n >= 2))
+  sqrt(2 / (n - 1)) * exp(lgamma(n / 2) - lgamma((n - 1) / 2))
+}
+# d2 = E(R)/sigma、d3 = SD(R)/sigma（常態母體，n = 2..25 的標準表值）。
+.d2_tab <- c(1.128, 1.693, 2.059, 2.326, 2.534, 2.704, 2.847, 2.970, 3.078,
+             3.173, 3.258, 3.336, 3.407, 3.472, 3.532, 3.588, 3.640, 3.689,
+             3.735, 3.778, 3.819, 3.858, 3.895, 3.931)
+.d3_tab <- c(0.853, 0.888, 0.880, 0.864, 0.848, 0.833, 0.820, 0.808, 0.797,
+             0.787, 0.778, 0.770, 0.763, 0.756, 0.750, 0.744, 0.739, 0.734,
+             0.729, 0.724, 0.720, 0.716, 0.712, 0.708)
+d2 <- function(n) { stopifnot(all(n >= 2 & n <= 25)); .d2_tab[n - 1] }
+d3 <- function(n) { stopifnot(all(n >= 2 & n <= 25)); .d3_tab[n - 1] }
+spc_constants <- function(n) {
+  k4 <- c4(n)
+  c(n = n, d2 = d2(n), d3 = d3(n), c4 = k4,
+    A2 = 3 / (d2(n) * sqrt(n)),
+    D3 = max(0, 1 - 3 * d3(n) / d2(n)), D4 = 1 + 3 * d3(n) / d2(n),
+    A3 = 3 / (k4 * sqrt(n)),
+    B3 = max(0, 1 - 3 * sqrt(1 - k4^2) / k4), B4 = 1 + 3 * sqrt(1 - k4^2) / k4)
+}
+ALPHA3 <- 2 * pnorm(-3)   # 單點、雙側、已知參數的名目誤報率 ≈ 0.0027
+
+spc_defaults <- function(cfg) {
+  d <- list(
+    data_file = NULL, data_file_phase2 = NULL, encoding = "UTF-8-BOM",
+    sheet = 1, data_type = "variable", chart = "auto",
+    col_time = NULL, col_id = NULL, col_subgroup = NULL, col_value = NULL,
+    col_count = NULL, col_size = NULL, col_phase = NULL,
+    phase1_label = "I", phase2_label = "II", phase1_end = NULL,
+    tz = "Asia/Taipei", characteristic = "品質特性", unit = "", purpose = "",
+    delta = NULL, small_shift = "auto", ewma_lambda = 0.2, ewma_L = 3,
+    cusum_k = 0.5, cusum_h = 5, weco = TRUE, limit_method = "normal",
+    count_limits = "auto", residual_chart = FALSE, residual_train_frac = 0.6,
+    exclusions_file = "exclusions.csv", write_exclusions = TRUE,
+    declared = NULL, process = list(), ocap = list(),
+    arl_reps = 400, seed = 20261116)
+  for (nm in names(d)) if (is.null(cfg[[nm]])) cfg[nm] <- list(d[[nm]])
+  cfg
+}
+
+## ---- block: data ----
+# 讀入 CSV／Excel；CSV 若不是 UTF-8（例如 Excel 存成 Big5），自動改用 CP950 重讀。
+spc_read <- function(path, encoding = "UTF-8-BOM", sheet = 1) {
+  if (!file.exists(path)) stop("找不到資料檔：", path, "（請確認路徑，相對路徑以本 qmd 所在資料夾為準）")
+  ext <- tolower(tools::file_ext(path))
+  if (ext %in% c("xlsx", "xls")) {
+    if (!requireNamespace("readxl", quietly = TRUE))
+      stop("讀取 Excel 需要 readxl 套件：install.packages('readxl')，或先另存為 CSV。")
+    return(as.data.frame(readxl::read_excel(path, sheet = sheet)))
+  }
+  rd <- function(enc) {
+    bad <- FALSE
+    x <- withCallingHandlers(
+      tryCatch(read.csv(path, stringsAsFactors = FALSE, check.names = FALSE, fileEncoding = enc),
+               error = function(e) { bad <<- TRUE; NULL }),
+      warning = function(w) { if (grepl("invalid|incomplete", conditionMessage(w))) bad <<- TRUE
+                              invokeRestart("muffleWarning") })
+    if (!bad && !is.null(x)) {
+      chr <- vapply(x, is.character, logical(1))
+      if (!nrow(x) || !all(validUTF8(c(names(x), unlist(x[chr]))))) bad <- TRUE
+    }
+    if (bad) NULL else x
+  }
+  x <- rd(encoding)
+  if (is.null(x)) x <- rd("CP950")
+  if (is.null(x)) stop("無法讀取 ", path, "：請確認檔案為 UTF-8 或 Big5（CP950）編碼的 CSV。")
+  x
+}
+
+.parse_time <- function(v, tz) {
+  if (is.numeric(v)) return(v)
+  out <- tryCatch(as.POSIXct(v, tz = tz, tryFormats = c(
+    "%Y-%m-%d %H:%M:%OS", "%Y/%m/%d %H:%M:%OS", "%Y-%m-%d %H:%M",
+    "%Y/%m/%d %H:%M", "%Y-%m-%d", "%Y/%m/%d")), error = function(e) NULL)
+  if (is.null(out) || anyNA(out[!is.na(v)])) return(NULL)
+  out
+}
+
+# 讀資料、檢查欄位與缺失、排序、指定 Phase，整理成「每個繪圖點一列」的表。
+spc_prepare <- function(cfg) {
+  warn <- character(0); info <- list()
+  raw1 <- spc_read(cfg$data_file, cfg$encoding, cfg$sheet)
+  raw1$.file_phase <- NA_character_
+  if (!is.null(cfg$data_file_phase2)) {
+    raw2 <- spc_read(cfg$data_file_phase2, cfg$encoding, cfg$sheet)
+    miss2 <- setdiff(names(raw1), c(names(raw2), ".file_phase"))
+    if (length(miss2)) stop("Phase II 檔案缺少欄位：", paste(miss2, collapse = ", "))
+    raw1$.file_phase <- "I"; raw2$.file_phase <- "II"
+    raw <- rbind(raw1, raw2[names(raw1)])
+  } else raw <- raw1
+  info$n_rows_raw <- nrow(raw)
+
+  type <- match.arg(cfg$data_type, c("variable", "nonconforming", "defects"))
+  need <- switch(type,
+    variable = c(cfg$col_value, cfg$col_subgroup),
+    nonconforming = c(cfg$col_count, cfg$col_size),
+    defects = c(cfg$col_count, cfg$col_size))
+  if (type == "variable" && is.null(cfg$col_value)) stop("計量值資料必須設定 col_value。")
+  if (type != "variable" && is.null(cfg$col_count)) stop("計數資料必須設定 col_count。")
+  if (type == "nonconforming" && is.null(cfg$col_size)) stop("不良品資料必須設定 col_size（每期檢查件數）。")
+  need <- c(need, cfg$col_time, cfg$col_id, cfg$col_phase)
+  miss <- setdiff(need, names(raw))
+  if (length(miss)) stop("資料中找不到設定的欄位：", paste(miss, collapse = ", "),
+                         "。目前的欄位有：", paste(setdiff(names(raw), ".file_phase"), collapse = ", "))
+
+  key <- unique(c(cfg$col_value, cfg$col_count, cfg$col_size, cfg$col_subgroup))
+  na_row <- !stats::complete.cases(raw[key])
+  info$n_rows_na <- sum(na_row)
+  if (any(na_row)) warn <- c(warn, sprintf(
+    "有 %d 列在必要欄位有缺失值，已排除，未以 0 或其他值補入。", sum(na_row)))
+  raw <- raw[!na_row, , drop = FALSE]
+  for (cc in c(cfg$col_value, cfg$col_count, cfg$col_size)) {
+    if (!is.numeric(raw[[cc]])) stop("欄位 ", cc, " 必須是數值，目前讀到的是文字；請檢查是否有單位或註記混入。")
+    if (any(!is.finite(raw[[cc]]))) stop("欄位 ", cc, " 有非有限值（Inf 或 NaN）。")
+  }
+
+  # 時間排序：保留原始時間順序，不依數值大小排序。
+  info$time_sorted <- NA
+  if (!is.null(cfg$col_time)) {
+    tt <- .parse_time(raw[[cfg$col_time]], cfg$tz)
+    if (is.null(tt)) {
+      warn <- c(warn, "時間欄位無法辨識格式，沿用檔案原本的列順序。")
+    } else {
+      o <- order(tt, seq_len(nrow(raw)))
+      info$time_sorted <- identical(o, seq_len(nrow(raw)))
+      if (!info$time_sorted) warn <- c(warn, "資料原本未依時間排序，已依時間重新排序。")
+      raw <- raw[o, , drop = FALSE]; raw$.time <- tt[o]
+    }
+  }
+  if (is.null(raw$.time)) raw$.time <- seq_len(nrow(raw))
+
+  # 組成繪圖點
+  if (type == "variable" && !is.null(cfg$col_subgroup)) {
+    g <- as.character(raw[[cfg$col_subgroup]])
+    ids <- unique(g)
+    sp <- split(raw[[cfg$col_value]], factor(g, levels = ids))
+    pts <- data.frame(
+      id = ids,
+      time = raw$.time[match(ids, g)],
+      n = vapply(sp, length, integer(1)),
+      mean = vapply(sp, mean, numeric(1)),
+      sd = vapply(sp, function(v) if (length(v) > 1) sd(v) else NA_real_, numeric(1)),
+      range = vapply(sp, function(v) diff(range(v)), numeric(1)),
+      stringsAsFactors = FALSE)
+    fp <- tapply(raw$.file_phase, factor(g, levels = ids), function(v) v[1])
+    pp <- if (!is.null(cfg$col_phase)) tapply(as.character(raw[[cfg$col_phase]]),
+                                              factor(g, levels = ids), function(v) {
+      if (length(unique(v)) > 1) NA_character_ else v[1] }) else NULL
+    if (!is.null(pp) && anyNA(pp)) stop("同一子群內的 Phase 標記不一致。")
+    pts$.file_phase <- as.character(fp)
+    pts$.phase_raw <- if (is.null(pp)) NA_character_ else as.character(pp)
+    pts$y <- pts$mean
+    # 子群編號若不連續地重複出現，代表同一編號被用在不同時間
+    run_ids <- rle(g)$values
+    if (anyDuplicated(run_ids)) warn <- c(warn,
+      "有子群編號在不同時間重複出現（同一編號不連續），已合併為同一子群；請確認是否為編號重複使用。")
+  } else {
+    id <- if (!is.null(cfg$col_id)) as.character(raw[[cfg$col_id]]) else as.character(seq_len(nrow(raw)))
+    if (anyDuplicated(id)) stop("識別欄位 ", cfg$col_id, " 有重複值；每個繪圖點需要唯一的編號。")
+    pts <- data.frame(id = id, time = raw$.time, stringsAsFactors = FALSE)
+    if (type == "variable") { pts$n <- 1L; pts$y <- raw[[cfg$col_value]] }
+    else {
+      pts$count <- raw[[cfg$col_count]]
+      pts$size <- if (is.null(cfg$col_size)) 1 else raw[[cfg$col_size]]
+      if (any(pts$count < 0) || any(pts$count != round(pts$count)))
+        stop("計數欄位必須是非負整數。")
+      if (any(pts$size <= 0)) stop("檢查件數／暴露量必須大於 0；暴露量為 0 的期別請先移出並另外記錄（不可當成 0 缺點率）。")
+      if (type == "nonconforming" && any(pts$count > pts$size)) stop("不良品數不可大於檢查件數。")
+      pts$y <- pts$count / pts$size
+    }
+    pts$.file_phase <- raw$.file_phase
+    pts$.phase_raw <- if (!is.null(cfg$col_phase)) as.character(raw[[cfg$col_phase]]) else NA_character_
+  }
+  pts$idx <- seq_len(nrow(pts))
+
+  # Phase 指定（優先順序：兩個檔案 > Phase 欄位 > phase1_end > 全部為 Phase I）
+  if (!is.null(cfg$data_file_phase2)) {
+    pts$phase <- pts$.file_phase; info$phase_rule <- "兩個檔案：第一個檔案為 Phase I，第二個為 Phase II"
+  } else if (!is.null(cfg$col_phase)) {
+    lab <- pts$.phase_raw
+    bad <- !lab %in% c(cfg$phase1_label, cfg$phase2_label)
+    if (any(bad)) stop("Phase 欄位出現未設定的標記：", paste(unique(lab[bad]), collapse = ", "))
+    pts$phase <- ifelse(lab == cfg$phase1_label, "I", "II")
+    info$phase_rule <- sprintf("依欄位 %s：%s 為 Phase I，%s 為 Phase II",
+                               cfg$col_phase, cfg$phase1_label, cfg$phase2_label)
+  } else if (!is.null(cfg$phase1_end)) {
+    k <- match(as.character(cfg$phase1_end), pts$id)
+    if (is.na(k)) stop("phase1_end = ", cfg$phase1_end, " 不是任何子群／資料點的編號。")
+    pts$phase <- ifelse(pts$idx <= k, "I", "II")
+    info$phase_rule <- sprintf("編號 %s（含）以前為 Phase I，之後為 Phase II", cfg$phase1_end)
+  } else {
+    pts$phase <- "I"; info$phase_rule <- "未提供監測資料，全部視為 Phase I"
+  }
+  if (any(pts$phase == "II")) {
+    if (max(pts$idx[pts$phase == "I"]) > min(pts$idx[pts$phase == "II"]))
+      warn <- c(warn, "Phase I 與 Phase II 在時間上交錯；Phase II 應在基準期之後，請確認切分方式。")
+  }
+  if (!any(pts$phase == "I")) stop("沒有 Phase I（基準）資料。")
+  pts$.file_phase <- NULL; pts$.phase_raw <- NULL
+
+  info$m1 <- sum(pts$phase == "I"); info$m2 <- sum(pts$phase == "II")
+  if (!is.null(pts$n)) info$n_table <- table(pts$n)
+
+  # 與使用者事先申報的結構比對（分支 2）
+  dec <- cfg$declared
+  if (!is.null(dec)) {
+    if (!is.null(dec$n) && type == "variable") {
+      act <- as.integer(names(which.max(table(pts$n))))
+      if (act != dec$n) warn <- c(warn, sprintf("申報每組 %d 筆，實際最常見為每組 %d 筆。", dec$n, act))
+    }
+    if (isTRUE(dec$n_fixed) && !is.null(pts$n) && length(unique(pts$n)) > 1)
+      warn <- c(warn, "申報子群大小固定，但實際子群大小不一致；已依實際資料選圖。")
+    if (isTRUE(dec$size_fixed) && !is.null(pts$size) && length(unique(pts$size)) > 1)
+      warn <- c(warn, "申報每期檢查件數／暴露量固定，但實際不一致；已依實際資料選圖。")
+    if (!is.null(dec$m1) && abs(info$m1 - dec$m1) > 0.2 * dec$m1)
+      warn <- c(warn, sprintf("申報 Phase I 約 %d 組，實際為 %d 組。", dec$m1, info$m1))
+  }
+  list(points = pts, type = type, info = info, warnings = warn)
+}
+
+## ---- block: select ----
+# 依資料型態與子群結構選圖；回傳圖型與選圖理由。
+spc_select <- function(prep, cfg) {
+  p <- prep$points; type <- prep$type; ch <- cfg$chart
+  nfix <- if (!is.null(p$n)) length(unique(p$n)) == 1 else NA
+  sfix <- if (!is.null(p$size)) length(unique(p$size)) == 1 else NA
+  if (ch == "auto") {
+    if (type == "variable") {
+      if (all(p$n == 1)) { ch <- "i_mr"; why <- "每次只取得一筆量測值，使用個別值與移動全距圖。" }
+      else if (any(p$n < 2)) stop("有子群只有 1 筆資料；子群圖需每組至少 2 筆，請檢查子群欄位。")
+      else if (nfix && p$n[1] <= 10) { ch <- "xbar_r"
+        why <- sprintf("每組固定 %d 筆（2–10 筆的傳統小子群），使用 Xbar–R 圖；S 圖也適用於小子群，且利用全部資料估計組內變異。", p$n[1]) }
+      else if (nfix) { ch <- "xbar_s"; why <- sprintf("每組固定 %d 筆，子群較大時 S 圖估計變異較有效率，使用 Xbar–S 圖。", p$n[1]) }
+      else { ch <- "xbar_s"; why <- sprintf("子群大小不固定（%d–%d 筆），使用合併組內變異的 Xbar–S 圖，界限逐點依 n_i 計算。", min(p$n), max(p$n)) }
+    } else if (type == "nonconforming") {
+      if (sfix) { ch <- "np"; why <- sprintf("每件只分合格／不合格，每期固定檢查 %g 件，使用 np 圖（不合格品數）。", p$size[1]) }
+      else { ch <- "p"; why <- "每件只分合格／不合格，每期檢查件數不同，使用 p 圖（不合格率），界限逐點依分母計算。" }
+    } else {
+      if (sfix) { ch <- "c"; why <- "一件可有多個缺點，每期檢查機會固定，使用 c 圖（缺點數）。" }
+      else { ch <- "u"; why <- "一件可有多個缺點，每期暴露量不同，使用 u 圖（單位缺點率），界限逐點依暴露量計算。" }
+    }
+  } else {
+    why <- "使用者指定圖型。"
+    ok <- switch(ch,
+      xbar_r = type == "variable" && isTRUE(nfix) && p$n[1] >= 2 && p$n[1] <= 25,
+      xbar_s = type == "variable" && all(p$n >= 2),
+      i_mr = type == "variable" && all(p$n == 1),
+      np = type == "nonconforming" && isTRUE(sfix),
+      p = type == "nonconforming",
+      c = type == "defects" && isTRUE(sfix),
+      u = type == "defects", FALSE)
+    if (!ok) stop("指定的圖型 ", ch, " 不符合資料結構（例如 np／c 圖需要固定分母、Xbar–R 需要固定 n）。")
+  }
+  list(chart = ch, reason = why,
+       location = ch %in% c("xbar_r", "xbar_s", "i_mr"),
+       label = c(xbar_r = "Xbar–R", xbar_s = "Xbar–S", i_mr = "I–MR", p = "p",
+                 np = "np", c = "c", u = "u")[[ch]])
+}
+
+## ---- block: limits ----
+# 只用 base（Phase I 且未剔除）估計參數；回傳各張圖的逐點表。
+# 每張表欄位：idx, id, phase, y, CL, LCL, UCL, z（標準化，用於 WECO 區帶）。
+.mk_tab <- function(p, y, CL, LCL, UCL, z = NULL) {
+  N <- nrow(p)
+  CL <- rep_len(CL, N); LCL <- rep_len(LCL, N); UCL <- rep_len(UCL, N)
+  if (is.null(z)) { s <- (UCL - CL) / 3; z <- ifelse(s > 0, (y - CL) / s, 0) }
+  data.frame(idx = p$idx, id = p$id, phase = p$phase, y = y,
+             CL = CL, LCL = LCL, UCL = UCL, z = z, stringsAsFactors = FALSE)
+}
+
+spc_limits <- function(p, sel, base, cfg) {
+  ch <- sel$chart; out <- list(); par <- list()
+  if (sum(base) < 2) stop("可用於估計的 Phase I 資料少於 2 點。")
+  if (ch == "xbar_r") {
+    n <- p$n[1]; K <- spc_constants(n)
+    xbb <- mean(p$mean[base]); rb <- mean(p$range[base])
+    par <- list(n = n, xbarbar = xbb, Rbar = rb, sigma = rb / K[["d2"]], const = K)
+    out$R <- .mk_tab(p, p$range, rb, K[["D3"]] * rb, K[["D4"]] * rb)
+    out$Xbar <- .mk_tab(p, p$mean, xbb, xbb - K[["A2"]] * rb, xbb + K[["A2"]] * rb)
+  } else if (ch == "xbar_s") {
+    if (length(unique(p$n)) == 1) {
+      n <- p$n[1]; K <- spc_constants(min(n, 25))
+      if (n > 25) K <- c(n = n, c4 = c4(n), A3 = 3 / (c4(n) * sqrt(n)),
+                         B3 = max(0, 1 - 3 * sqrt(1 - c4(n)^2) / c4(n)),
+                         B4 = 1 + 3 * sqrt(1 - c4(n)^2) / c4(n))
+      xbb <- mean(p$mean[base]); sb <- mean(p$sd[base])
+      par <- list(n = n, xbarbar = xbb, Sbar = sb, sigma = sb / K[["c4"]], const = K, varying = FALSE)
+      out$S <- .mk_tab(p, p$sd, sb, K[["B3"]] * sb, K[["B4"]] * sb)
+      out$Xbar <- .mk_tab(p, p$mean, xbb, xbb - K[["A3"]] * sb, xbb + K[["A3"]] * sb)
+    } else {
+      nb <- p$n[base]; df0 <- sum(nb - 1)
+      sp <- sqrt(sum((nb - 1) * p$sd[base]^2) / df0)
+      sig <- sp / c4(df0 + 1)
+      mu <- sum(nb * p$mean[base]) / sum(nb)
+      k4 <- c4(p$n)
+      par <- list(mu = mu, s_pooled = sp, sigma = sig, df = df0, varying = TRUE)
+      out$S <- .mk_tab(p, p$sd, k4 * sig, pmax(0, k4 - 3 * sqrt(1 - k4^2)) * sig,
+                       (k4 + 3 * sqrt(1 - k4^2)) * sig)
+      out$Xbar <- .mk_tab(p, p$mean, mu, mu - 3 * sig / sqrt(p$n), mu + 3 * sig / sqrt(p$n))
+    }
+  } else if (ch == "i_mr") {
+    x <- p$y; N <- length(x)
+    mr <- c(NA, abs(diff(x)))
+    use_mr <- c(FALSE, base[-1] & base[-N])
+    if (sum(use_mr) < 1) stop("基準期沒有相鄰的有效點，無法計算移動全距。")
+    mrb <- mean(mr[use_mr]); xb <- mean(x[base])
+    sig <- mrb / 1.128
+    par <- list(xbar = xb, MRbar = mrb, sigma = sig, method = cfg$limit_method)
+    pm <- p[-1, , drop = FALSE]
+    out$MR <- .mk_tab(pm, mr[-1], mrb, 0, 3.267 * mrb)
+    out$I <- NULL
+    if (cfg$limit_method == "normal") {
+      out$I <- .mk_tab(p, x, xb, xb - 3 * sig, xb + 3 * sig)
+    } else if (cfg$limit_method == "lognormal") {
+      if (any(x <= 0)) stop("lognormal 界限需要所有量測值大於 0。")
+      lx <- log(x); lmr <- c(NA, abs(diff(lx)))
+      ml <- mean(lx[base]); sl <- mean(lmr[use_mr]) / 1.128
+      par$log_mean <- ml; par$log_sigma <- sl; par$log_MRbar <- mean(lmr[use_mr])
+      out$I <- .mk_tab(p, x, exp(ml), exp(ml - 3 * sl), exp(ml + 3 * sl), z = (lx - ml) / sl)
+      # 偏態資料的 MR 也在對數尺度計算
+      out$MR <- .mk_tab(pm, lmr[-1], par$log_MRbar, 0, 3.267 * par$log_MRbar)
+    } else if (cfg$limit_method == "empirical") {
+      q <- stats::quantile(x[base], c(ALPHA3 / 2, 1 - ALPHA3 / 2), type = 8, names = FALSE)
+      par$q <- q
+      out$I <- .mk_tab(p, x, stats::median(x[base]), q[1], q[2], z = rep(0, N))
+    } else stop("limit_method 只能是 normal、lognormal 或 empirical。")
+    out <- out[c("I", "MR")]
+  } else {
+    D <- p$count; n <- p$size
+    if (ch %in% c("p", "np")) {
+      pb <- sum(D[base]) / sum(n[base])
+      if (pb <= 0 || pb >= 1) stop("基準期不合格率為 0 或 1，界限退化；不能據此認定真實比例為 0，請增加基準資訊或採經審核的外部目標。")
+      expct <- min(c(n * pb, n * (1 - pb)))
+      exact <- cfg$count_limits == "exact" || (cfg$count_limits == "auto" && expct < 5)
+      par <- list(pbar = pb, min_expected = expct, exact = exact)
+      if (exact) {
+        L <- qbinom(ALPHA3 / 2, n, pb); U <- qbinom(1 - ALPHA3 / 2, n, pb)
+        se <- sqrt(pb * (1 - pb) / n)
+        if (ch == "p") out$p <- .mk_tab(p, D / n, pb, L / n, U / n, z = (D / n - pb) / se)
+        else out$np <- .mk_tab(p, D, n * pb, L, U, z = (D - n * pb) / (se * n))
+      } else if (ch == "p") {
+        se <- sqrt(pb * (1 - pb) / n)
+        out$p <- .mk_tab(p, D / n, pb, pmax(0, pb - 3 * se), pmin(1, pb + 3 * se), z = (D / n - pb) / se)
+      } else {
+        nn <- n[1]; sdv <- sqrt(nn * pb * (1 - pb))
+        out$np <- .mk_tab(p, D, nn * pb, max(0, nn * pb - 3 * sdv), min(nn, nn * pb + 3 * sdv),
+                          z = (D - nn * pb) / sdv)
+      }
+    } else {
+      ub <- sum(D[base]) / sum(n[base])
+      if (ub <= 0) stop("基準期缺點數全為 0，界限退化；不能據此認定真實缺點率為 0。")
+      expct <- min(n * ub)
+      exact <- cfg$count_limits == "exact" || (cfg$count_limits == "auto" && expct < 5)
+      par <- list(ubar = ub, cbar = if (ch == "c") mean(D[base]) else NULL,
+                  min_expected = expct, exact = exact)
+      lam <- n * ub
+      if (exact) {
+        L <- qpois(ALPHA3 / 2, lam); U <- qpois(1 - ALPHA3 / 2, lam)
+        if (ch == "u") out$u <- .mk_tab(p, D / n, ub, L / n, U / n, z = (D - lam) / sqrt(lam))
+        else out$c <- .mk_tab(p, D, lam, L, U, z = (D - lam) / sqrt(lam))
+      } else if (ch == "u") {
+        se <- sqrt(ub / n)
+        out$u <- .mk_tab(p, D / n, ub, pmax(0, ub - 3 * se), ub + 3 * se, z = (D / n - ub) / se)
+      } else {
+        cb <- mean(D[base])
+        out$c <- .mk_tab(p, D, cb, max(0, cb - 3 * sqrt(cb)), cb + 3 * sqrt(cb), z = (D - cb) / sqrt(cb))
+      }
+    }
+  }
+  list(charts = out, params = par)
+}
+
+## ---- block: rules ----
+# 判讀規則。WECO 4 條只用於位置圖（Xbar、I、殘差圖）；
+# R／S／MR、計數圖、EWMA／CUSUM 只判斷是否超出界限（規則 1）。
+# 規則 2、3 要求「目前這一點」本身也落在該側區帶，才在此點標記。
+weco_flags <- function(z, use_all = TRUE) {
+  N <- length(z); r <- matrix(FALSE, N, 4, dimnames = list(NULL, paste0("r", 1:4)))
+  r[, 1] <- abs(z) > 3
+  if (use_all) for (i in seq_len(N)) {
+    if (i >= 3) { w <- z[(i - 2):i]
+      r[i, 2] <- (z[i] > 2 && sum(w > 2) >= 2) || (z[i] < -2 && sum(w < -2) >= 2) }
+    if (i >= 5) { w <- z[(i - 4):i]
+      r[i, 3] <- (z[i] > 1 && sum(w > 1) >= 4) || (z[i] < -1 && sum(w < -1) >= 4) }
+    if (i >= 8) { w <- z[(i - 7):i]; r[i, 4] <- all(w > 0) || all(w < 0) }
+  }
+  r
+}
+
+# 在逐點表上加上 rule1–rule4、signal、rules 文字欄；剔除點不參與判讀（從序列中拿掉）。
+spc_flag <- function(tab, excluded_ids, location, weco = TRUE) {
+  tab$excluded <- tab$id %in% excluded_ids & tab$phase == "I"
+  keep <- !tab$excluded & is.finite(tab$y)
+  r <- matrix(FALSE, nrow(tab), 4, dimnames = list(NULL, paste0("r", 1:4)))
+  # 規則 1 一律用實際界限（含精確分位數界限）以嚴格不等號判定
+  r1 <- tab$y > tab$UCL + 1e-12 | tab$y < tab$LCL - 1e-12
+  if (location && weco) {
+    rr <- weco_flags(tab$z[keep], TRUE); r[keep, ] <- rr; r[keep, 1] <- r1[keep]
+  } else r[keep, 1] <- r1[keep]
+  tab <- cbind(tab, r)
+  tab$signal <- rowSums(r) > 0
+  tab$rules <- apply(r, 1, function(v) paste(which(v), collapse = ","))
+  tab$direction <- ifelse(!tab$signal, "", ifelse(tab$y > tab$CL, "high", "low"))
+  tab
+}
+
+## ---- block: phase1 ----
+# exclusions.csv：Phase I 失控點的調查紀錄。
+# 欄位：id, round, chart, rules, direction, decision, reason
+# decision 填 exclude（或「剔除」）＝找到可歸屬原因且不屬於未來基準 → 剔除後重算；
+#          keep（或「保留」）＝查無原因或屬於正常機制 → 保留在基準；空白＝尚未調查。
+.decision_norm <- function(v) {
+  v <- tolower(trimws(as.character(v))); v[is.na(v)] <- ""
+  ifelse(v %in% c("exclude", "剔除", "x", "yes", "y", "1", "是"), "exclude",
+         ifelse(v %in% c("keep", "保留", "no", "n", "0", "否"), "keep", ""))
+}
+spc_read_exclusions <- function(file) {
+  empty <- data.frame(id = character(0), round = integer(0), chart = character(0),
+                      rules = character(0), direction = character(0),
+                      decision = character(0), reason = character(0), stringsAsFactors = FALSE)
+  if (is.null(file) || !file.exists(file)) return(empty)
+  ex <- read.csv(file, stringsAsFactors = FALSE, colClasses = "character",
+                 fileEncoding = "UTF-8-BOM")
+  if (nrow(ex) && !all(validUTF8(unlist(ex))))
+    ex <- read.csv(file, stringsAsFactors = FALSE, colClasses = "character", fileEncoding = "CP950")
+  miss <- setdiff(names(empty), names(ex))
+  if (length(miss)) stop("exclusions.csv 缺少欄位：", paste(miss, collapse = ", "), "；請不要刪改欄名。")
+  ex <- ex[names(empty)]
+  ex$round <- as.integer(ex$round); ex$decision <- .decision_norm(ex$decision)
+  ex$reason[is.na(ex$reason)] <- ""
+  ex
+}
+spc_write_exclusions <- function(ex, file) {
+  writeBin(as.raw(c(0xef, 0xbb, 0xbf)), file)  # UTF-8 BOM：讓 Excel 正確顯示中文
+  con <- file(file, open = "a", encoding = "UTF-8")
+  on.exit(close(con))
+  write.csv(ex, con, row.names = FALSE)
+}
+
+# 合併本次 Phase I 警報與既有紀錄：既有決定保留，新警報附加為待確認。
+spc_sync_exclusions <- function(flagged, ex) {
+  cur_round <- if (nrow(ex)) max(ex$round, na.rm = TRUE) + 1L else 1L
+  new <- flagged[!flagged$id %in% ex$id, , drop = FALSE]
+  if (nrow(new)) ex <- rbind(ex, data.frame(id = new$id, round = cur_round,
+    chart = new$chart, rules = new$rules, direction = new$direction,
+    decision = "", reason = "", stringsAsFactors = FALSE))
+  ex$currently_flagged <- ex$id %in% flagged$id
+  ex
+}
+
+## ---- block: checks ----
+# 假設與條件檢查：先看穩定性，再看分布；結果只作為判斷線索，不機械決定。
+spc_checks <- function(p, sel, base, lim, cfg) {
+  out <- list(); msg <- character(0); rec <- character(0)
+  ch <- sel$chart; m <- sum(base)
+  out$m <- m
+  if (m < 20) msg <- c(msg, sprintf("基準期可用 %d 點，少於 20；界限估計不確定性大（25 組只是教學起點，不保證準確）。", m))
+  # 自相關（以 Phase I 未剔除點的監測統計量序列）
+  ys <- p$y[base]
+  if (m >= 10) {
+    lag <- max(1, min(10, floor(m / 5)))
+    a <- stats::acf(ys, lag.max = lag, plot = FALSE)$acf[-1]
+    lb <- stats::Box.test(ys, lag = lag, type = "Ljung-Box")
+    out$acf1 <- a[1]; out$lb_p <- lb$p.value; out$lb_lag <- lag
+    out$autocorr <- lb$p.value < 0.05
+    if (out$autocorr) {
+      msg <- c(msg, sprintf("基準序列有自相關（lag-1 自相關 %.2f，Ljung-Box p = %.3g）；傳統界限與 ARL 可能失真。", a[1], lb$p.value))
+      rec <- c(rec, if (ch == "i_mr") "先以製程知識判斷相關來自正常慣性或可移除的異常；若是正常慣性，可設定 residual_chart = TRUE 改用 AR(1) 殘差管制圖。"
+               else "回查抽樣間隔與子群是否過於密集；若相關來自正常製程慣性，需改用模型化方法。")
+    }
+  } else out$autocorr <- NA
+  # 分布（只在穩定性檢查後參考）
+  if (ch == "i_mr" && m >= 8 && m <= 5000) {
+    if (cfg$limit_method == "lognormal") ys <- log(ys)
+    out$dist_scale <- if (cfg$limit_method == "lognormal") "對數尺度" else "原始尺度"
+    sw <- stats::shapiro.test(ys); sk <- mean((ys - mean(ys))^3) / sd(ys)^3
+    out$shapiro_p <- sw$p.value; out$skew <- sk
+    out$nonnormal <- sw$p.value < 0.01 && abs(sk) > 0.5
+    if (out$nonnormal) {
+      msg <- c(msg, sprintf("個別值（%s）分布偏離常態（Shapiro–Wilk p = %.3g，偏態係數 %.2f）；I 圖對稱 3σ 界限的誤報率不再是名目值。", out$dist_scale, sw$p.value, sk))
+      rec <- c(rec, paste0("先確認基準期是否混入不同狀態；若分布本質偏態，依製程知識選擇適當分布",
+        if (all(ys > 0) && sk > 0) "（例如設定 limit_method = \"lognormal\"）" else "",
+        "，或在基準點數很多時用 limit_method = \"empirical\"（分位數界限）。不為通過常態檢定任意轉換資料。"))
+    }
+  }
+  if (ch %in% c("xbar_r", "xbar_s")) {
+    gm <- p$mean[base]
+    if (length(gm) >= 8 && length(gm) <= 5000) out$shapiro_mean_p <- stats::shapiro.test(gm)$p.value
+  }
+  # 量測解析度：R 或 MR 為 0 的比例
+  zr <- if (ch == "xbar_r") mean(p$range[base] == 0) else if (ch == "i_mr")
+    mean(diff(p$y[base]) == 0) else if (ch == "xbar_s") mean(p$sd[base] == 0) else NA
+  out$zero_spread <- zr
+  if (!is.na(zr) && zr > 0.2) {
+    msg <- c(msg, sprintf("基準期有 %.0f%% 的全距／標準差／移動全距為 0，量測解析度可能不足，變異會被低估。", 100 * zr))
+    rec <- c(rec, "檢查量具解析度（通常需能分辨製程變異的 1/10）並評估量測系統。")
+  }
+  # 計數圖：過度／不足離散
+  if (ch %in% c("p", "np", "c", "u")) {
+    D <- p$count[base]; n <- p$size[base]
+    if (ch %in% c("p", "np")) { pb <- lim$params$pbar
+      phi <- sum((D - n * pb)^2 / (n * pb * (1 - pb))) / (m - 1) }
+    else { ub <- lim$params$ubar; phi <- sum((D - n * ub)^2 / (n * ub)) / (m - 1) }
+    out$phi <- phi
+    if (phi > 1.5 || phi < 0.67) {
+      msg <- c(msg, sprintf("Pearson 離散指標 %.2f（理想約為 1），%s。", phi,
+        if (phi > 1.5) "有過度離散，Binomial／Poisson 界限可能過窄而產生大量警報" else "有不足離散，界限可能過寬"))
+      rec <- c(rec, "先查混合來源、群聚、非穩定與風險組成，必要時分層；不要直接把界限乘以 sqrt(phi)。Laney p′／u′ 等方法需另行校準，本 skill 未實作。")
+    }
+    if (isTRUE(lim$params$exact)) msg <- c(msg, sprintf(
+      "期望計數最小僅 %.2f（< 5），三標準差常態近似不佳，已改用 %s 分布精確分位數界限。",
+      lim$params$min_expected, if (ch %in% c("p", "np")) "Binomial" else "Poisson"))
+  }
+  out$messages <- msg; out$recommend <- rec
+  out
+}
+
+## ---- block: smallshift ----
+# EWMA 與 CUSUM：偵測小而持續的均值偏移。
+# delta 以「個體標準差 sigma」為單位；輸入統計量為子群平均時，
+# 標準化偏移 delta_Y = delta * sqrt(n)。
+spc_small_shift <- function(p, sel, base, lim, cfg) {
+  if (!sel$location) return(list(use = FALSE, why = "只有計量值資料使用 EWMA／CUSUM。"))
+  sig <- lim$params$sigma
+  mu0 <- if (sel$chart == "i_mr") lim$params$xbar else lim$params$xbarbar %||% lim$params$mu
+  nbar <- mean(p$n)
+  dY <- if (!is.null(cfg$delta)) cfg$delta * sqrt(nbar) else NA
+  use <- if (identical(cfg$small_shift, "auto")) isTRUE(dY < 1.5) else isTRUE(cfg$small_shift)
+  if (!use) return(list(use = FALSE, delta_Y = dY,
+    why = if (is.na(dY)) "未設定要偵測的偏移大小，只使用 Shewhart 圖。"
+          else sprintf("要偵測的偏移為輸入統計量的 %.2f 個標準差（≥ 1.5），Shewhart 圖已有合理偵測力。", dY)))
+  mon <- if (any(p$phase == "II")) p$phase == "II" else base
+  retro <- !any(p$phase == "II")
+  pm <- p[mon, , drop = FALSE]
+  Y <- pm$y; sY <- sig / sqrt(pm$n); lam <- cfg$ewma_lambda; L <- cfg$ewma_L
+  # EWMA：Z_0 = mu0；逐點變異 V_t = lam^2 s_t^2 + (1-lam)^2 V_{t-1}
+  Z <- V <- numeric(length(Y)); zp <- mu0; vp <- 0
+  for (t in seq_along(Y)) {
+    Z[t] <- lam * Y[t] + (1 - lam) * zp; V[t] <- lam^2 * sY[t]^2 + (1 - lam)^2 * vp
+    zp <- Z[t]; vp <- V[t]
+  }
+  ewma <- .mk_tab(pm, Z, mu0, mu0 - L * sqrt(V), mu0 + L * sqrt(V))
+  # CUSUM（標準化、雙側表格式）
+  W <- (Y - mu0) / sY; k <- cfg$cusum_k; h <- cfg$cusum_h
+  cp <- cm <- numeric(length(W)); a <- b <- 0
+  for (t in seq_along(W)) { cp[t] <- max(0, a + W[t] - k); cm[t] <- max(0, b - W[t] - k); a <- cp[t]; b <- cm[t] }
+  cup <- .mk_tab(pm, cp, 0, 0, h); clo <- .mk_tab(pm, cm, 0, 0, h)
+  list(use = TRUE, retro = retro, delta_Y = dY, mu0 = mu0, s_Y = unique(signif(sY, 6)),
+       ewma = spc_flag(ewma, character(0), FALSE), cusum_up = spc_flag(cup, character(0), FALSE),
+       cusum_lo = spc_flag(clo, character(0), FALSE),
+       why = sprintf("要偵測的偏移為輸入統計量的 %.2f 個標準差（< 1.5），加畫 EWMA 與 CUSUM。", dY))
+}
+
+## ---- block: residual ----
+# 自相關個別值：固定參數 AR(1) 一步預測殘差圖。
+# Phase I 依時間切成訓練（估計模型）與校準（設定界限）；Phase II 固定參數監測。
+spc_residual <- function(p, sel, cfg, excl = character(0)) {
+  if (!isTRUE(cfg$residual_chart)) return(list(use = FALSE))
+  if (sel$chart != "i_mr") stop("殘差管制圖只用於個別值資料。")
+  x <- p$y; i1 <- which(p$phase == "I"); m <- length(i1)
+  if (m < 50) stop("殘差管制圖需要至少 50 個 Phase I 點，才能切出訓練與校準資料。")
+  ntr <- floor(m * cfg$residual_train_frac)
+  tr <- i1[seq_len(ntr)]; cal <- i1[(ntr + 1):m]; mon <- which(p$phase == "II")
+  fit <- stats::arima(x[tr], order = c(1, 0, 0), include.mean = TRUE, method = "ML")
+  phi <- unname(coef(fit)["ar1"]); mu <- unname(coef(fit)["intercept"])
+  pred <- function(idx) mu + phi * (x[idx - 1] - mu)
+  cal_use <- cal[!p$id[cal] %in% excl]   # 剔除點不用於設定界限（模型不重估）
+  r_cal <- x[cal_use] - pred(cal_use)
+  rc <- mean(r_cal); sr <- sd(r_cal) / c4(length(r_cal))
+  idx <- c(cal, mon)
+  tab <- .mk_tab(p[idx, , drop = FALSE], x[idx] - pred(idx), rc, rc - 3 * sr, rc + 3 * sr)
+  tab$phase <- ifelse(idx %in% cal, "I", "II")
+  lb <- stats::Box.test(r_cal, lag = min(15, floor(length(r_cal) / 5)), type = "Ljung-Box")
+  list(use = TRUE, phi = phi, mu = mu, rc = rc, sr = sr, n_train = ntr, n_cal = length(cal),
+       lb_p = lb$p.value, acf_train = stats::acf(x[tr], plot = FALSE),
+       acf_cal = stats::acf(r_cal, plot = FALSE),
+       tab = spc_flag(tab, excl, TRUE, cfg$weco), pred = pred(idx))
+}
+
+## ---- block: run ----
+# 主流程：讀資料 → 選圖 → 套用 exclusions.csv → 估計界限 → 判讀 → 檢查 → 小偏移／殘差圖。
+spc_run <- function(cfg) {
+  cfg <- spc_defaults(cfg)
+  set.seed(cfg$seed)
+  prep <- spc_prepare(cfg); p <- prep$points
+  sel <- spc_select(prep, cfg)
+  ex <- spc_read_exclusions(cfg$exclusions_file)
+  bad_id <- setdiff(ex$id, p$id[p$phase == "I"])
+  if (length(bad_id)) prep$warnings <- c(prep$warnings, sprintf(
+    "exclusions.csv 中有 %d 個編號不是 Phase I 的點（%s），已忽略。", length(bad_id), paste(head(bad_id, 5), collapse = ", ")))
+  excl <- intersect(ex$id[ex$decision == "exclude"], p$id[p$phase == "I"])
+  base <- p$phase == "I" & !(p$id %in% excl)
+  lim <- spc_limits(p, sel, base, cfg)
+  charts <- lapply(names(lim$charts), function(nm) {
+    loc <- nm %in% c("Xbar", "I")
+    if (nm == "I" && cfg$limit_method == "empirical") loc <- FALSE
+    spc_flag(lim$charts[[nm]], excl, loc, cfg$weco)
+  })
+  names(charts) <- names(lim$charts)
+  resid <- spc_residual(p, sel, cfg, excl)
+  # 判讀依據：一般為各張管制圖；殘差圖模式下改以殘差圖判讀（I–MR 圖僅供對照）
+  judge <- if (isTRUE(resid$use)) list(Residual = resid$tab) else charts
+  # Phase I 警報彙整（同一子群在成對圖的警報合併）
+  fl <- do.call(rbind, lapply(names(judge), function(nm) {
+    t <- judge[[nm]]; t <- t[t$phase == "I" & t$signal & !t$excluded, , drop = FALSE]
+    if (!nrow(t)) return(NULL)
+    data.frame(id = t$id, chart = nm, rules = t$rules, direction = t$direction, stringsAsFactors = FALSE)
+  }))
+  if (is.null(fl)) fl <- data.frame(id = character(0), chart = character(0), rules = character(0),
+                                     direction = character(0), stringsAsFactors = FALSE)
+  if (nrow(fl)) fl <- do.call(rbind, lapply(split(fl, factor(fl$id, levels = unique(fl$id))), function(d)
+    data.frame(id = d$id[1], chart = paste(d$chart, collapse = "; "),
+               rules = paste(paste0(d$chart, ":", d$rules), collapse = "; "),
+               direction = paste(unique(d$direction), collapse = "/"), stringsAsFactors = FALSE)))
+  ex2 <- spc_sync_exclusions(fl, ex)
+  if (isTRUE(cfg$write_exclusions) && !is.null(cfg$exclusions_file))
+    spc_write_exclusions(ex2[setdiff(names(ex2), "currently_flagged")], cfg$exclusions_file)
+  pending <- ex2$id[ex2$decision == "" & ex2$currently_flagged]
+  kept <- ex2$id[ex2$decision == "keep" & ex2$currently_flagged]
+  status <- if (length(pending)) "pending" else if (length(kept)) "kept_unexplained" else "stable"
+  checks <- spc_checks(p, sel, base, lim, cfg)
+  small <- spc_small_shift(p, sel, base, lim, cfg)
+  # Phase II 警報
+  p2 <- do.call(rbind, lapply(names(judge), function(nm) {
+    t <- judge[[nm]]; t <- t[t$phase == "II" & t$signal, , drop = FALSE]
+    if (!nrow(t)) return(NULL)
+    data.frame(chart = nm, id = t$id, idx = t$idx, rules = t$rules, direction = t$direction,
+               value = t$y, stringsAsFactors = FALSE)
+  }))
+  list(cfg = cfg, prep = prep, sel = sel, lim = lim, charts = charts, base = base,
+       excluded = excl, flagged_I = fl, exclusions = ex2, pending = pending, kept = kept,
+       status = status, checks = checks, small = small, resid = resid, phase2_signals = p2)
+}
+
+## ---- block: plot ----
+# ggplot2 版管制圖，沿用教材配色：CL 綠線、界限紅色虛線、超界紅點、
+# 其他 WECO 規則橘色三角形、剔除點灰色叉號、灰色虛線分隔 Phase I／II。
+spc_gg <- function(tab, title, ylab, xlab = "Subgroup / observation", phase_line = TRUE) {
+  tab$kind <- ifelse(tab$excluded %||% FALSE, "Excluded",
+              ifelse(tab$r1, "Beyond limits", ifelse(tab$signal, "Other WECO rule", "In control")))
+  g <- ggplot(tab, aes(idx, y)) +
+    geom_step(aes(y = UCL), colour = "#cb181d", linetype = "dashed", direction = "mid") +
+    geom_step(aes(y = LCL), colour = "#cb181d", linetype = "dashed", direction = "mid") +
+    geom_step(aes(y = CL), colour = "#238b45", linewidth = 0.7, direction = "mid") +
+    geom_line(data = tab[!tab$kind %in% "Excluded", ], colour = "#235789", linewidth = 0.4) +
+    geom_point(aes(colour = kind, shape = kind), size = 1.9) +
+    scale_colour_manual(values = c("In control" = "#235789", "Beyond limits" = "#cb181d",
+                                   "Other WECO rule" = "#e6550d", "Excluded" = "gray55"), drop = TRUE) +
+    scale_shape_manual(values = c("In control" = 16, "Beyond limits" = 19,
+                                  "Other WECO rule" = 17, "Excluded" = 4), drop = TRUE) +
+    scale_y_continuous(labels = function(b) formatC(b, format = "fg", digits = 6)) +
+    labs(title = title, x = xlab, y = ylab, colour = NULL, shape = NULL) +
+    theme_minimal(base_size = 11) +
+    theme(legend.position = "bottom", plot.title = element_text(face = "bold"))
+  if (phase_line && any(tab$phase == "II") && any(tab$phase == "I"))
+    g <- g + geom_vline(xintercept = max(tab$idx[tab$phase == "I"]) + 0.5,
+                        linetype = "dotted", colour = "gray40")
+  g
+}
+spc_chart_meta <- function(nm, cfg) {
+  u <- if (nzchar(cfg$unit)) paste0(" (", cfg$unit, ")") else ""
+  switch(nm,
+    Xbar = list(t = "Xbar chart", y = paste0("Subgroup mean", u)),
+    R = list(t = "R chart", y = paste0("Range", u)),
+    S = list(t = "S chart", y = paste0("Std. dev.", u)),
+    I = list(t = "Individuals chart", y = paste0("Value", u)),
+    MR = if (identical(cfg$limit_method, "lognormal")) list(t = "Moving range chart of log(value)", y = "MR of log(value)")
+         else list(t = "Moving range chart (width 2)", y = paste0("MR", u)),
+    Residual = list(t = "AR(1) one-step residual chart", y = paste0("Residual", u)),
+    p = list(t = "p chart", y = "Proportion nonconforming"),
+    np = list(t = "np chart", y = "Nonconforming units"),
+    c = list(t = "c chart", y = "Defects"),
+    u = list(t = "u chart", y = "Defects per unit of exposure"))
+}
+
+## ---- block: formulas ----
+# 依實際圖型輸出 LaTeX 公式（markdown 字串，用於 results: asis 的程式區塊）。
+spc_formula_md <- function(res) {
+  ch <- res$sel$chart; P <- res$lim$params; f <- function(x) trimws(formatC(x, digits = 6, format = "g"))
+  s <- switch(ch,
+    xbar_r = c(
+      "$$\\bar X_i=\\frac1n\\sum_{j=1}^n X_{ij},\\quad R_i=\\max_jX_{ij}-\\min_jX_{ij},\\quad \\bar{\\bar X}=\\frac1m\\sum_{i=1}^m\\bar X_i,\\quad \\bar R=\\frac1m\\sum_{i=1}^mR_i,\\quad\\hat\\sigma=\\bar R/d_2(n).$$",
+      "| 圖 | $\\mathrm{CL}$ | $\\mathrm{LCL}$ | $\\mathrm{UCL}$ |", "|---|---|---|---|",
+      "| $\\bar X$ | $\\bar{\\bar X}$ | $\\bar{\\bar X}-A_2\\bar R$ | $\\bar{\\bar X}+A_2\\bar R$ |",
+      "| $R$ | $\\bar R$ | $D_3\\bar R$ | $D_4\\bar R$ |", "",
+      "$$A_2=\\frac3{d_2\\sqrt n},\\quad D_3=\\max\\left(0,1-3\\frac{d_3}{d_2}\\right),\\quad D_4=1+3\\frac{d_3}{d_2}.$$",
+      sprintf("本次 $n=%d$：$d_2=%s$、$d_3=%s$、$A_2=%s$、$D_3=%s$、$D_4=%s$；$\\bar{\\bar X}=%s$、$\\bar R=%s$、$\\hat\\sigma=%s$。",
+              P$n, f(P$const[["d2"]]), f(P$const[["d3"]]), f(P$const[["A2"]]), f(P$const[["D3"]]),
+              f(P$const[["D4"]]), f(P$xbarbar), f(P$Rbar), f(P$sigma))),
+    xbar_s = if (!isTRUE(P$varying)) c(
+      "$$S_i=\\sqrt{\\frac{\\sum_{j=1}^n(X_{ij}-\\bar X_i)^2}{n-1}},\\quad \\bar S=\\frac1m\\sum_i S_i,\\quad c_4(n)=\\sqrt{\\frac2{n-1}}\\frac{\\Gamma(n/2)}{\\Gamma((n-1)/2)},\\quad \\hat\\sigma=\\bar S/c_4.$$",
+      "| 圖 | $\\mathrm{CL}$ | $\\mathrm{LCL}$ | $\\mathrm{UCL}$ |", "|---|---|---|---|",
+      "| $\\bar X$ | $\\bar{\\bar X}$ | $\\bar{\\bar X}-A_3\\bar S$ | $\\bar{\\bar X}+A_3\\bar S$ |",
+      "| $S$ | $\\bar S$ | $B_3\\bar S$ | $B_4\\bar S$ |", "",
+      "$$A_3=\\frac3{c_4\\sqrt n},\\quad B_3=\\max\\left(0,1-3\\frac{\\sqrt{1-c_4^2}}{c_4}\\right),\\quad B_4=1+3\\frac{\\sqrt{1-c_4^2}}{c_4}.$$",
+      sprintf("本次 $n=%d$：$c_4=%s$、$A_3=%s$、$B_3=%s$、$B_4=%s$；$\\bar{\\bar X}=%s$、$\\bar S=%s$、$\\hat\\sigma=%s$。",
+              P$n, f(P$const[["c4"]]), f(P$const[["A3"]]), f(P$const[["B3"]]), f(P$const[["B4"]]),
+              f(P$xbarbar), f(P$Sbar), f(P$sigma))) else c(
+      "子群大小不同，以組內平方和合併估計變異並作小樣本修正：",
+      "$$s_p=\\sqrt{\\frac{\\sum_i(n_i-1)S_i^2}{\\sum_i(n_i-1)}},\\qquad \\hat\\sigma=s_p/c_4\\!\\left(\\textstyle\\sum_i(n_i-1)+1\\right),\\qquad \\hat\\mu=\\frac{\\sum_i n_i\\bar X_i}{\\sum_i n_i}.$$",
+      "$$\\bar X\\text{ 圖：}\\hat\\mu\\pm3\\hat\\sigma/\\sqrt{n_i};\\qquad S\\text{ 圖：}\\mathrm{CL}_i=c_4(n_i)\\hat\\sigma,\\ \\ \\mathrm{LCL}_i/\\mathrm{UCL}_i=\\left(c_4(n_i)\\mp3\\sqrt{1-c_4(n_i)^2}\\right)\\hat\\sigma\\ (\\mathrm{LCL}\\ge0).$$",
+      sprintf("本次 $\\hat\\mu=%s$、$s_p=%s$、$\\hat\\sigma=%s$。", f(P$mu), f(P$s_pooled), f(P$sigma))),
+    i_mr = c(
+      "$$MR_i=|x_i-x_{i-1}|,\\quad\\overline{MR}=\\frac1{m-1}\\sum_{i=2}^mMR_i,\\quad\\hat\\sigma=\\overline{MR}/1.128.$$",
+      "$I$ 圖：$\\mathrm{CL}=\\bar x$，$\\mathrm{LCL}/\\mathrm{UCL}=\\bar x\\mp3\\hat\\sigma$。$\\mathrm{MR}$ 圖：$\\mathrm{CL}=\\overline{MR}$、$\\mathrm{LCL}=0$、$\\mathrm{UCL}=3.267\\overline{MR}$。只使用兩端都屬於基準的移動全距。",
+      if (P$method == "lognormal") sprintf("本次依製程知識採對數常態界限：$\\mathrm{LCL}/\\mathrm{UCL}=\\exp(\\hat\\mu_{\\log}\\mp3\\hat\\sigma_{\\log})$，$\\hat\\mu_{\\log}=%s$、$\\hat\\sigma_{\\log}=%s$；WECO 區帶與 MR 圖都在對數尺度計算。", f(P$log_mean), f(P$log_sigma))
+      else if (P$method == "empirical") sprintf("本次採基準期經驗分位數界限：$\\mathrm{LCL}=\\hat F^{-1}(\\alpha/2)=%s$、$\\mathrm{UCL}=\\hat F^{-1}(1-\\alpha/2)=%s$，$\\alpha=%s$；只判斷超界。", f(P$q[1]), f(P$q[2]), f(ALPHA3))
+      else "",
+      sprintf("本次 $\\bar x=%s$、$\\overline{MR}=%s$、$\\hat\\sigma=%s$。", f(P$xbar), f(P$MRbar), f(P$sigma))),
+    p = c("$$\\hat p_i=D_i/n_i,\\qquad\\bar p=\\frac{\\sum_{i\\in I}D_i}{\\sum_{i\\in I}n_i},\\qquad \\mathrm{LCL}_i/\\mathrm{UCL}_i=\\bar p\\mp3\\sqrt{\\frac{\\bar p(1-\\bar p)}{n_i}}\\ \\text{（截在 0 與 1）}.$$",
+          sprintf("本次 $\\bar p=%s$。", f(P$pbar))),
+    np = c("$$\\bar p=\\frac{\\sum_{i\\in I}D_i}{mn},\\quad \\mathrm{CL}=n\\bar p,\\quad \\mathrm{LCL}/\\mathrm{UCL}=n\\bar p\\mp3\\sqrt{n\\bar p(1-\\bar p)}\\ \\text{（截在 0 與 n）}.$$",
+           sprintf("本次 $\\bar p=%s$。", f(P$pbar))),
+    c = c("$$\\bar c=\\frac1m\\sum_{i\\in I}C_i,\\qquad \\mathrm{CL}=\\bar c,\\qquad \\mathrm{LCL}=\\max(0,\\bar c-3\\sqrt{\\bar c}),\\quad \\mathrm{UCL}=\\bar c+3\\sqrt{\\bar c}.$$",
+          sprintf("本次 $\\bar c=%s$。", f(P$cbar))),
+    u = c("$$u_i=C_i/e_i,\\qquad\\bar u=\\frac{\\sum_{i\\in I}C_i}{\\sum_{i\\in I}e_i},\\qquad \\mathrm{LCL}_i/\\mathrm{UCL}_i=\\bar u\\mp3\\sqrt{\\bar u/e_i}\\ \\text{（LCL 截在 0）}.$$",
+          sprintf("本次 $\\bar u=%s$。", f(P$ubar))))
+  if (ch %in% c("p", "np", "c", "u") && isTRUE(P$exact)) s <- c(s, "",
+    "因期望計數小，本次改用精確分布分位數界限（判定採嚴格不等號）：",
+    "$$L_i=F_i^{-1}(\\alpha/2),\\qquad U_i=F_i^{-1}(1-\\alpha/2),\\qquad \\alpha=2\\{1-\\Phi(3)\\}\\approx0.0027.$$")
+  s <- s[nzchar(s)]
+  tbl <- startsWith(s, "|")
+  sep <- ifelse(tbl[-1] & tbl[-length(tbl)], "\n", "\n\n")
+  paste0(c(s[1], paste0(sep, s[-1])), collapse = "")
+}
+
+## ---- block: interpret ----
+# 規則式自動解讀（不宣稱原因已證實，也不把「沒有警報」寫成「已證明穩定」）。
+spc_fmt_ids <- function(ids, max = 8) {
+  if (!length(ids)) return("無")
+  s <- paste(head(ids, max), collapse = "、"); if (length(ids) > max) s <- paste0(s, " 等 ", length(ids), " 點")
+  s
+}
+spc_text_phase1 <- function(res) {
+  ex <- res$exclusions; nx <- length(res$excluded)
+  s <- sprintf("基準期（Phase I）共 %d 點，", res$prep$info$m1)
+  if (isTRUE(res$resid$use)) s <- paste0(sprintf("（殘差圖模式：以 AR(1) 一步預測殘差圖判讀，Phase I 前 %d 點只用於訓練模型、後 %d 點用於校準與判讀；剔除只把該點移出界限估計與判讀，不重新估計模型。若訓練期內有特殊原因，應重新選擇訓練期間。）", res$resid$n_train, res$resid$n_cal), s)
+  s <- paste0(s, if (nx) sprintf("其中 %d 點已依調查紀錄剔除（%s）後重算界限。", nx, spc_fmt_ids(res$excluded))
+                 else "沒有剔除任何點。")
+  s <- paste0(s, switch(res$status,
+    pending = sprintf("目前仍有 %d 點警報尚未調查（%s），基準尚未定案，下面的界限與 Phase II 結果都是暫定的。",
+                      length(res$pending), spc_fmt_ids(res$pending)),
+    kept_unexplained = sprintf("另有 %d 點警報經調查未找到可歸屬原因而保留在基準中（%s）；界限可以使用，但基準可能不夠穩定，應持續觀察。",
+                               length(res$kept), spc_fmt_ids(res$kept)),
+    stable = "在所採用的判讀規則下，基準期已沒有未處理的警報，可作為監測基準。（這不等於證明製程完全穩定。）"))
+  s
+}
+spc_text_phase2 <- function(res) {
+  if (!any(res$prep$points$phase == "II")) return("本次沒有 Phase II 監測資料。")
+  s2 <- res$phase2_signals
+  if (is.null(s2) || !nrow(s2)) return(sprintf(
+    "Phase II 共 %d 點，在所採用的判讀規則下沒有出現警報；這表示尚未偵測到指定規則下的變化，不代表已證明沒有變化。",
+    res$prep$info$m2))
+  first <- s2[which.min(s2$idx), ]
+  m1 <- max(res$prep$points$idx[res$prep$points$phase == "I"])
+  byc <- tapply(s2$id, s2$chart, function(v) length(unique(v)))
+  dir <- if (any(s2$direction == "high") && any(s2$direction == "low")) "偏高與偏低都有"
+         else if (all(s2$direction == "high")) "皆為偏高" else "皆為偏低"
+  sprintf("Phase II 共 %d 點，首次警報出現在編號 %s（監測期第 %d 點，%s 圖，規則 %s）。各圖警報點數：%s；方向%s。警報是調查線索，原因仍須現場確認；連續警報彼此相關，不能當成多個獨立事件。",
+          res$prep$info$m2, first$id, first$idx - m1, first$chart, first$rules,
+          paste(paste0(names(byc), " ", byc, " 點"), collapse = "、"), dir)
+}
+spc_text_small <- function(res) {
+  sm <- res$small
+  if (!isTRUE(sm$use)) return(sm$why)
+  f1 <- function(t) { i <- which(t$signal); if (length(i)) t$id[i[1]] else NA }
+  e <- f1(sm$ewma); cu <- f1(sm$cusum_up); cl <- f1(sm$cusum_lo)
+  paste0(sm$why, if (sm$retro) "（沒有 Phase II，因此以 Phase I 作回顧性計算。）" else "",
+         " EWMA 首次警報：", ifelse(is.na(e), "無", e),
+         "；CUSUM 上側：", ifelse(is.na(cu), "無", cu), "；下側：", ifelse(is.na(cl), "無", cl),
+         "。這些圖的預設參數不保證 ARL₀ 等於 370，與 Shewhart 圖聯合使用也會提高整體誤報率。")
+}
+
+## ---- block: ocap ----
+# 合理子群建議與 OCAP（失控處理計畫），依事前問答的製程背景產生。
+spc_subgroup_advice <- function(res) {
+  pr <- res$cfg$process; ch <- res$sel$chart; out <- character(0)
+  if (ch %in% c("xbar_r", "xbar_s")) {
+    if (identical(pr$sampling, "consecutive")) out <- c(out, "子群為同一時間點連續抽取，組內變異代表短期波動，符合合理分組的原則。")
+    if (identical(pr$sampling, "spread")) out <- c(out, "子群是分散在一段時間內抽取，組內變異會混入時間上的變化，使 Xbar 界限變寬而降低偵測力；建議改為同一時間點連續抽取。")
+  }
+  if (length(pr$sources)) {
+    if (isTRUE(pr$sources_mixed)) out <- c(out, sprintf("同一子群混合了不同的%s，組內變異包含來源差異，可能掩蓋真正的變化；建議依來源分層，各自建立管制圖。", paste(pr$sources, collapse = "、")))
+    else out <- c(out, sprintf("製程有%s等變異來源；子群未混合來源，但若各來源平均水準不同，應考慮分層畫圖。", paste(pr$sources, collapse = "、")))
+  }
+  if (identical(pr$msa, "not_done")) out <- c(out, "量測系統尚未做過 MSA；量測變異或儀器漂移可能造成假警報，建議先完成量測系統分析。")
+  if (identical(pr$resolution, "poor")) out <- c(out, "使用者表示量具解析度可能不足；解析度太差會讓全距／移動全距常為 0 而低估變異。")
+  if (!is.null(pr$interval)) out <- c(out, sprintf("抽樣間隔為%s；警報延遲 k 點約等於 k 個抽樣間隔的時間。", pr$interval))
+  if (!length(out)) out <- "未提供抽樣方式等製程背景，無法評估子群是否合理。"
+  out
+}
+spc_ocap <- function(res) {
+  oc <- res$cfg$ocap; r <- oc$roles %||% list()
+  first <- r$first %||% "現場作業人員"; inv <- r$investigate %||% "製程工程師"; dec <- r$decide %||% "品保主管"
+  causes <- oc$causes %||% c("原料／批次變更", "設備或刀具狀態", "量測或資料輸入錯誤", "人員或班別交接")
+  stats::setNames(data.frame(
+    1:6,
+    c("確認量測與資料輸入是否正確（量具、單位、輸入錯誤）",
+             paste0("依常見原因逐項檢查：", paste(causes, collapse = "、")),
+             "依品質風險決定產品隔離、加驗或暫停調整；避免無警報時任意調機",
+             "回查警報前後的變更紀錄（換線、換料、維修、人員）",
+             "在 exclusions.csv（Phase I）或警報紀錄（Phase II）記下：找到特殊原因／原因模型不足／未找到原因",
+             "確認改善後，再決定是否重建基準（回到 Phase I）；不因紅點而擴大界限"),
+    c(first, inv, dec, inv, inv, dec), stringsAsFactors = FALSE),
+    c("步驟", "做什麼", "負責角色"))
+}
+
+## ---- block: arl ----
+# ARL 模擬（零狀態、已知參數）與參數估計不確定性；只是設計參考，不是實際表現保證。
+spc_run_length <- function(chart, delta, lambda, L, k, h, max_steps = 10000) {
+  z <- cp <- cm <- 0
+  for (t in seq_len(max_steps)) {
+    y <- rnorm(1, delta, 1)
+    if (chart == "EWMA") { z <- lambda * y + (1 - lambda) * z
+      hit <- abs(z) > L * sqrt(lambda / (2 - lambda) * (1 - (1 - lambda)^(2 * t))) }
+    else if (chart == "CUSUM") { cp <- max(0, cp + y - k); cm <- max(0, cm - y - k); hit <- cp > h || cm > h }
+    else hit <- abs(y) > 3
+    if (hit) return(c(time = t, signaled = 1))
+  }
+  c(time = max_steps, signaled = 0)
+}
+spc_mc_arl <- function(chart, delta, B, cfg) {
+  a <- replicate(B, spc_run_length(chart, delta, cfg$ewma_lambda, cfg$ewma_L, cfg$cusum_k, cfg$cusum_h))
+  tm <- a["time", ]; hit <- a["signaled", ]
+  data.frame(chart = chart, shift = delta, replications = B, restricted_mean_RL = mean(tm),
+             MCSE = sd(tm) / sqrt(B), censor_fraction = mean(hit == 0))
+}
+spc_conditional_arl <- function(m, B = 1000) {
+  a <- replicate(B, { b <- rnorm(m); mu <- mean(b); sg <- sd(b) / c4(m)
+    1 / (pnorm(mu - 3 * sg) + pnorm(mu + 3 * sg, lower.tail = FALSE)) })
+  data.frame(baseline_m = m, q10 = unname(quantile(a, .1)), median = median(a),
+             q90 = unname(quantile(a, .9)))
+}
+
+## ---- block: plain ----
+# 一般讀者版的白話文字：只用實際結果與日常用語，不寫成因果或保證。
+spc_main_chart <- function(res) if (isTRUE(res$resid$use)) "Residual" else
+  intersect(c("Xbar", "I", "p", "np", "c", "u"), names(res$charts))[1]
+spc_get_tab <- function(res, nm) if (nm == "Residual") res$resid$tab else res$charts[[nm]]
+spc_spread_chart <- function(res) intersect(c("R", "S", "MR"), names(res$charts))[1]
+.num <- function(x, d = 3) formatC(signif(x, d), format = "fg", big.mark = ",")
+.pct <- function(x) paste0(formatC(100 * x, format = "f", digits = 1), "%")
+spc_plain_quantity <- function(res) {
+  ch <- res$sel$chart; nm <- res$cfg$characteristic
+  if (isTRUE(res$resid$use)) return(paste0(nm, "的預測誤差（實際值減去依前一筆預測的值）"))
+  switch(ch, xbar_r = , xbar_s = paste0("每批平均", nm), i_mr = nm,
+         p = "不合格率", np = "每批不合格件數", c = "每期缺點數", u = "每單位缺點數")
+}
+spc_plain_value <- function(res, x) {
+  u <- res$cfg$unit
+  t <- spc_get_tab(res, spc_main_chart(res))
+  rng <- diff(range(c(t$LCL, t$UCL)))           # 依正常範圍寬度決定小數位數
+  dec <- if (rng > 0) max(0, 2 - floor(log10(rng))) else 3
+  if (res$sel$chart == "p") .pct(x) else paste0(formatC(x, format = "f", digits = dec, big.mark = ","),
+    if (nzchar(u) && res$sel$chart != "u") paste0(" ", u) else "")
+}
+spc_plain_answer <- function(res) {
+  t <- spc_get_tab(res, spc_main_chart(res)); q <- spc_plain_quantity(res)
+  has2 <- any(t$phase == "II")
+  pre <- if (res$status == "pending") sprintf("（暫定結論：基準期還有 %d 個異常點等待現場確認原因。）", length(res$pending)) else ""
+  s2 <- res$phase2_signals
+  if (!has2) return(paste0(switch(res$status,
+    stable = "在這段期間的資料中，製程沒有出現需要調查的異常訊號，可以用來當作日後比較的正常範圍。",
+    kept_unexplained = "這段期間大致可以當作正常範圍，但有少數異常點查不到原因，應持續觀察。",
+    pending = "這段期間出現了異常點，需要先查明原因，才能決定正常範圍。"), pre))
+  if (is.null(s2) || !nrow(s2)) return(paste0(sprintf(
+    "監測期的 %d 筆資料都落在正常範圍內，目前沒有看到值得調查的變化。", res$prep$info$m2), pre))
+  m1 <- max(t$idx[t$phase == "I"]); f <- s2[which.min(s2$idx), ]
+  dir <- if (all(s2$direction == "high")) "偏高" else if (all(s2$direction == "low")) "偏低" else "忽高忽低"
+  note <- if (dir == "偏低" && !res$sel$location) "（不良變少可能代表改善，也可能是判定標準或檢驗方式改變）" else ""
+  paste0(sprintf("監測期從第 %d 筆（編號 %s）開始出現異常訊號，%s%s%s，值得到現場調查原因。",
+                 f$idx - m1, f$id, q, dir, note), pre)
+}
+spc_plain_findings <- function(res) {
+  mc <- spc_main_chart(res); t <- spc_get_tab(res, mc); q <- spc_plain_quantity(res)
+  b <- character(0)
+  cl <- unique(t$CL); lo <- range(t$LCL); hi <- range(t$UCL)
+  rng <- if (length(unique(t$UCL)) == 1) sprintf("%s 到 %s", spc_plain_value(res, t$LCL[1]), spc_plain_value(res, t$UCL[1]))
+         else sprintf("大約 %s 到 %s（每筆依檢查數量不同而略有差異）", spc_plain_value(res, max(lo)), spc_plain_value(res, min(hi)))
+  nb <- if (isTRUE(res$resid$use)) res$resid$n_cal else sum(res$base)
+  b <- c(b, sprintf("用基準期 %d 筆資料建立「正常範圍」：%s的中心約為 %s，正常波動範圍是 %s。",
+                    nb, q, spc_plain_value(res, cl[1]), rng))
+  t2 <- t[t$phase == "II", ]
+  if (nrow(t2)) {
+    nsig <- sum(t2$signal)
+    if (nsig) {
+      i0 <- which(t2$signal)[1]; after <- t2[i0:nrow(t2), ]
+      d <- mean(after$y) - cl[1]
+      b <- c(b, sprintf("監測期 %d 筆中有 %d 筆出現異常訊號。從第一個訊號起的 %d 筆，%s整體為 %s，比基準中心%s約 %s%s。",
+        nrow(t2), nsig, nrow(after), q, spc_plain_value(res, mean(after$y)), if (d > 0) "高" else "低",
+        if (res$sel$chart == "p") paste0(formatC(100 * abs(d), format = "f", digits = 1), " 個百分點") else spc_plain_value(res, abs(d)),
+        "（這是描述差異，不代表已知道原因）"))
+    } else b <- c(b, sprintf("監測期 %d 筆都沒有超出正常範圍，也沒有出現連續偏向一側的型態。", nrow(t2)))
+  }
+  sc <- spc_spread_chart(res)
+  if (!is.na(sc)) {
+    s2 <- res$charts[[sc]]; ns <- sum(s2$signal & s2$phase == "II")
+    if (any(s2$phase == "II")) b <- c(b, if (ns) sprintf("同一批內的差異（批內波動）在監測期有 %d 筆異常變大或變小，也需要一起檢查。", ns)
+                                       else "同一批內的差異（批內波動）在監測期沒有異常。")
+  }
+  ex <- res$exclusions; ex <- ex[ex$decision == "exclude", ]
+  if (nrow(ex)) b <- c(b, sprintf("建立正常範圍時，有 %d 筆因已查明原因而排除：%s。", nrow(ex),
+    paste(sprintf("編號 %s（%s）", ex$id, ifelse(nzchar(ex$reason), ex$reason, "原因未填寫")), collapse = "、")))
+  head(b, 4)
+}
+spc_plain_cautions <- function(res) {
+  c0 <- res$checks; out <- character(0)
+  if (res$status == "pending") out <- c(out, "基準期還有異常點尚未查明原因，正常範圍可能還會調整，因此本報告的結論是暫定的。")
+  if (isTRUE(c0$autocorr)) out <- c(out, "相鄰資料彼此有關聯（前一筆高、下一筆也容易高），一般的正常範圍可能太窄或太寬，判斷異常時要多參考現場情況。")
+  if (isTRUE(c0$nonnormal)) out <- c(out, "資料分布不對稱，正常範圍的上下界可能不夠準確。")
+  if (c0$m < 20) out <- c(out, sprintf("建立正常範圍的資料只有 %d 筆，範圍本身還不太穩定。", c0$m))
+  if (!is.null(c0$phi) && (c0$phi > 1.5 || c0$phi < 0.67)) out <- c(out, "各期之間的差異比一般預期大（或小），可能混合了不同來源（例如不同機台或批次），建議分開檢視。")
+  if (isTRUE(c0$zero_spread > 0.2)) out <- c(out, "量測工具的精細程度可能不夠，波動可能被低估。")
+  out <- c(out, "出現異常訊號代表「值得調查」，不代表已經知道原因；沒有訊號也不代表製程一定沒有變化。")
+  head(out, 4)
+}
+
+spc_plain_glossary <- function(res) {
+  g <- stats::setNames(data.frame(c("正常波動範圍（管制界限）", "中心線", "異常訊號（警報）", "基準期／監測期"),
+    c("用基準期資料算出的上下界，製程沒有特別變化時，絕大多數點會落在其中。它不是產品規格。",
+           "基準期的平均水準。",
+           "某點超出範圍，或連續多點偏向同一側；代表值得調查，不代表已知道原因。",
+           "基準期用來建立正常範圍；監測期用固定的範圍檢查新資料。")), c("term", "desc"))
+  if (!is.na(spc_spread_chart(res))) g <- rbind(g, data.frame(term = "批內波動", desc = "同一批產品之間（或相鄰兩次量測之間）的差異大小。"))
+  if (isTRUE(res$small$use)) g <- rbind(g, data.frame(term = "EWMA", desc = "把最近的資料加權平均的圖，用來發現小而持續的偏移。"))
+  stats::setNames(g, c("名詞", "說明"))
+}
