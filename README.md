@@ -58,7 +58,6 @@
         └── exclusions.csv                 ← 第一次 render 產生的待查清單
 ```
 
-> 範例的 HTML 報告已內嵌圖表；GitHub 不會直接顯示 HTML，請下載後用瀏覽器開啟。
 
 ### 各元件如何協作
 
@@ -90,7 +89,7 @@
 ### 呼叫方式
 
 ```text
-@viscosity.csv /spc-control-chart 幫我分析這筆資料
+/spc-control-chart 幫我分析這筆資料
 ```
 
 或直接描述需求，例如「我想看這條產線的不良率是否穩定」。提到管制圖、SPC、製程是否穩定、失控點、管制界限、品質監測、不良率監測時，Skill 會自動啟用。
