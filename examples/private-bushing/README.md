@@ -90,7 +90,7 @@ Phase II（用第二次的界限）
  
 這份資料由**常態獨立誤差**加上**人為埋入的偏移**組成。
  
-第 $g$ 組第 $k$ 件（$g = 1,\dots,45$,$k = 1,\dots,5$）的外徑為
+第 $g$ 組第 $k$ 件（$g = 1, \dots, 45$ 、 $k = 1, \dots, 5$ ）的外徑為
  
 $$
 X_{gk} = \mu + \Delta_g + \varepsilon_{gk} + \eta_{gk},\qquad
