@@ -3,7 +3,7 @@
 以**繁體中文**進行 SPC（Statistical Process Control，統計製程管制）管制圖分析的 Claude Skill。
 依資料結構自動選圖、檢查假設、以 `exclusions.csv` 記錄 Phase I 失控原因，最後交付含逐段 R 程式碼的 Quarto（`.qmd`）與 HTML 報告。
 
-- **支援圖型**：$\bar X$–$R$、$\bar X$–$S$、$I$–$\mathrm{MR}$、$p$、$np$、$c$、$u$、EWMA、CUSUM、自相關資料的 AR(1) 殘差圖
+- **支援圖型**：X̄–R、X̄–S、I–MR、p、np、c、u、EWMA、CUSUM、自相關資料的 AR(1) 殘差圖
 - **兩種報告**：統計背景版（公式、假設檢查、ARL 模擬、完整程式碼）與一般讀者版（白話、第一屏就看到答案）
 - **兩條分支**：
   - **公開資料**：Claude 直接讀資料、畫圖、和使用者逐點確認失控原因，交付兩版報告
