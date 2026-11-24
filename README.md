@@ -187,7 +187,7 @@ flowchart LR
 
 1. 界限只用 Phase I 中**未剔除**的點估計；Phase II 固定界限，不重估。
 2. Phase I 只有在找到可歸屬原因、且不屬於未來基準機制時才剔除，並記錄原因；查無原因的點保留。**決定由使用者做**，Claude 不自行判定原因。
-3. WECO 4 條規則只用於位置圖（$\bar X$、$I$、殘差圖）；$R$／$S$／$\mathrm{MR}$、計數圖、EWMA／CUSUM 只判斷是否超界。
+3. WECO 4 條規則只用於位置圖（X̄、I、殘差圖）；R／S／MR、計數圖、EWMA／CUSUM 只判斷是否超界。
 4. 先看穩定性，再看分布；不為通過常態檢定任意轉換資料。偏態個別值依製程知識改用 lognormal，或在基準點數很多時用經驗分位數界限。
 5. 計數圖：期望數小時用精確分位數界限；檢查過度／不足離散，不直接放寬界限。基準期零事件時停止。
 6. 自相關個別值：先判斷是正常慣性還是可移除的異常；正常慣性才用 AR(1) 殘差圖。
@@ -216,7 +216,7 @@ flowchart LR
 | Phase 切分 | `trial = TRUE` 第 1–20 批為基準期；`FALSE` 第 21–35 批為監測期 |
 | 選圖 | 每批只有一筆 → I–MR 圖；使用者希望偵測約 0.5σ 偏移 → 加畫 EWMA／CUSUM |
 | Phase I 決策 | 第 4 批（35.96）在 I 圖與 MR 圖都超出上界；使用者回覆查無原因 → **保留** |
-| 假設檢查 | Shapiro–Wilk $p = 0.003$，但偏態主要來自第 4 批單一點；無自相關 → 使用者選擇**維持常態 3σ 界限**，報告註明限制 |
+| 假設檢查 | Shapiro–Wilk p = 0.003，但偏態主要來自第 4 批單一點；無自相關 → 使用者選擇**維持常態 3σ 界限**，報告註明限制 |
 | 主要發現 | 中心線 34.09、I 圖界限 32.56–35.61。監測期無點超界，但第 25 批起連續 11 批在中心線之上（約 +1.2σ）；I 圖 WECO 規則於第 29 批、上側 CUSUM 於第 30 批、EWMA 於第 35 批發出警報 |
 | 附檔 | [`viscosity.csv`](examples/public-viscosity/viscosity.csv)、[`report_stat.html`](examples/public-viscosity/report_stat.html)／[`.qmd`](examples/public-viscosity/report_stat.qmd)、[`report_general.html`](examples/public-viscosity/report_general.html)／[`.qmd`](examples/public-viscosity/report_general.qmd)、[`exclusions.csv`](examples/public-viscosity/exclusions.csv) |
 
@@ -313,11 +313,11 @@ flowchart LR
 | 資料 | 以亂數產生的**虛構資料**（225 列＝45 組 × 5 件），另附 Big5 版本測試自動改用 CP950 讀檔 |
 | Claude 知道的 | 只有使用者口述的抽樣方式與欄位「種類」說明；**沒有讀取資料檔、沒有看到任何數值** |
 | 事前問答 | 8 題：資料性質、偏移大小（1σ）、MSA（沒做過）、變異來源、資料格式、Phase 切分、OCAP 角色、常見原因 |
-| 選圖 | n = 5 固定 → X̄–R 圖；$\delta\sqrt n = 2.24 \ge 1.5$ → 不另加 EWMA／CUSUM |
+| 選圖 | n = 5 固定 → X̄–R 圖；δ√n = 2.24 ≥ 1.5 → 不另加 EWMA／CUSUM |
 | Claude 交付 | `bushing_od_spc.qmd`（設定區保留 5 個「★ 請填寫」） |
 | 本機使用 | 填欄名 → `quarto render` → 在 `exclusions.csv` 填 `exclude`／`keep` → 再 render 到第 6 章顯示「基準已定案」 |
 | 附檔 | [`simulation data.csv`](examples/private-bushing/simulation%20data.csv)、[`bushing_od_spc.qmd`](examples/private-bushing/bushing_od_spc.qmd)（★ 已填）、[`bushing_od_spc.html`](examples/private-bushing/bushing_od_spc.html)、[`exclusions.csv`](examples/private-bushing/exclusions.csv) |
-| 附檔狀態 | 本機**第一次 render** 的結果：$\bar{\bar X} = 25.0021$，與答案卷一致；第 7 組（R 圖）、第 12 組（$\bar X$ 圖）待查，基準標示為「暫定」。依「現場備註」在 `exclusions.csv` 填寫後再 render，即可完成剔除與界限重算 |
+| 附檔狀態 | 本機**第一次 render** 的結果：X̄̄ = 25.0021，與答案卷一致；第 7 組（R 圖）、第 12 組（X̄̄  圖）待查，基準標示為「暫定」。依「現場備註」在 `exclusions.csv` 填寫後再 render，即可完成剔除與界限重算 |
 | 驗證方式 | 資料中埋入三個事件（量具未歸零、原料換批、更換刀具），README 附參考答案（摺疊），可比對範本在本機跑出的結果 |
 
 **為什麼用模擬資料：** 公開資料集可能出現在模型的訓練資料中（範例 1 中 Claude 就從欄位與筆數認出了 qcc 的 `viscosity`），無法分辨範本是真的正確，還是 AI 早就知道答案。使用者自行產生、從未公開的資料，才能驗證「AI 沒看過資料也能做出正確範本」這個承諾。
